@@ -462,13 +462,14 @@ apply_rtsp_stop_guard() {
 }
 
 # Re-run through modules to apply any post-update patches (idempotent)
-for mod in "$MODULES_DIR"/*; do
-  [ -d "$mod" ] || continue
-  name=$(basename "$mod")
-  if [ "$name" = "MMM-RTSPStream" ]; then
-    apply_rtsp_stop_guard "$mod"
-  fi
-done
+# DISABLED: RTSPStream patch was causing stream loading issues
+# for mod in "$MODULES_DIR"/*; do
+#   [ -d "$mod" ] || continue
+#   name=$(basename "$mod")
+#   if [ "$name" = "MMM-RTSPStream" ]; then
+#     apply_rtsp_stop_guard "$mod"
+#   fi
+# done
 
 if [ "$DRY_RUN" = true ]; then
   log "DRY RUN finished — no restarts performed"
