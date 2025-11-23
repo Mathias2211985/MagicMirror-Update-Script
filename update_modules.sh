@@ -335,24 +335,27 @@ for mod in "$MODULES_DIR"/*; do
       fi
     fi
     
-    # Determine if this module needs a special npm command (module-specific override)
+    # Universal npm strategy: use npm ci for clean install if lockfile exists and module was git-updated
+    # Otherwise use npm install for flexibility
     npm_special_cmd=""
+    
+    # If module was just updated via git, prefer clean install to avoid dependency conflicts
+    if [ "${module_git_updated:-false}" = "true" ] && [ -f "$mod/package-lock.json" ]; then
+      npm_special_cmd="ci"
+      log "Module was git-updated and has lockfile - using npm ci for clean install"
+    fi
+    
+    # Module-specific overrides (only add if absolutely necessary for specific modules)
     case "$name" in
       MMM-Webuntis)
         # Some npm versions do not support `--omit=dev`. Use a broader install to be compatible.
         npm_special_cmd="install --only=production"
+        log "Using module-specific override for $name: $npm_special_cmd"
         ;;
-      MMM-RTSPStream)
-        # RTSPStream needs clean install after git updates to avoid dependency issues
-        npm_special_cmd="ci"
-        ;;
-      MMM-Fuel)
-        # Fuel module also benefits from clean install
-        npm_special_cmd="ci"
-        ;;
-      # add other module-specific overrides here, e.g.
+      # Add other module-specific overrides here only if the universal strategy fails
       # MMM-Example)
       #   npm_special_cmd="install --no-audit --no-fund"
+      #   log "Using module-specific override for $name: $npm_special_cmd"
       #   ;;
     esac
 
@@ -367,75 +370,92 @@ for mod in "$MODULES_DIR"/*; do
         fi
       fi
     else
-      if [ -n "$npm_special_cmd" ]; then
-        # run npm with fallback logic: try the special command, if it fails because the npm
-        # binary doesn't support that flag/command, fall back to safer alternatives.
-        run_npm_with_fallback() {
-          local modpath="$1"
-          local cmd="$2"
-          local rc=0
-          log "Running: ${SUDO_CMD:+$SUDO_CMD }npm --prefix \"$modpath\" $cmd"
-          tmpout=$(mktemp)
-          if npm_exec --prefix "$modpath" $cmd --no-audit --no-fund >"$tmpout" 2>&1; then
-            cat "$tmpout" | tee -a "$LOG_FILE"
-            rc=0
-            # restore ownership so files are usable by the normal user
-            chown_module "$modpath"
-          else
-            cat "$tmpout" | tee -a "$LOG_FILE"
-            rc=1
-          fi
-          if [ $rc -ne 0 ]; then
-            # If npm says 'Unknown command' or similar, try fallbacks
-            if grep -qi "Unknown command" "$tmpout" || grep -qi "unknown" "$tmpout"; then
-              log "npm reported unknown command for '$cmd' - trying fallback 'ci' without extra flags"
+      # Universal npm installation with intelligent fallback strategy
+      run_npm_with_fallback() {
+        local modpath="$1"
+        local cmd="$2"
+        local rc=0
+        log "Running: ${SUDO_CMD:+$SUDO_CMD }npm --prefix \"$modpath\" $cmd"
+        tmpout=$(mktemp)
+        
+        # Try the requested command first
+        if npm_exec --prefix "$modpath" $cmd --no-audit --no-fund >"$tmpout" 2>&1; then
+          cat "$tmpout" | tee -a "$LOG_FILE"
+          rc=0
+          chown_module "$modpath"
+        else
+          cat "$tmpout" | tee -a "$LOG_FILE"
+          rc=1
+          
+          # Intelligent fallback: try different strategies based on error type
+          if grep -qi "Unknown command" "$tmpout" || grep -qi "unknown" "$tmpout"; then
+            log "npm reported unknown command for '$cmd' - trying fallback strategies"
+            
+            # Strategy 1: Try npm ci if lockfile exists
+            if [ -f "$modpath/package-lock.json" ]; then
+              log "Fallback 1: Trying npm ci (lockfile present)"
               if npm_exec --prefix "$modpath" ci --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
-                log "fallback npm ci succeeded for $modpath"
+                log "Fallback npm ci succeeded"
+                rc=0
+                chown_module "$modpath"
+              fi
+            fi
+            
+            # Strategy 2: If ci failed or no lockfile, try regular install
+            if [ $rc -ne 0 ]; then
+              log "Fallback 2: Trying npm install"
+              if npm_exec --prefix "$modpath" install --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
+                log "Fallback npm install succeeded"
+                rc=0
+                chown_module "$modpath"
+              fi
+            fi
+            
+            # Strategy 3: Last resort - install with production-only flag
+            if [ $rc -ne 0 ]; then
+              log "Fallback 3: Trying npm install --only=production"
+              if npm_exec --prefix "$modpath" install --only=production --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
+                log "Fallback npm install --only=production succeeded"
                 rc=0
                 chown_module "$modpath"
               else
-                log "fallback npm ci failed for $modpath — trying 'install --only=production'"
-                if npm_exec --prefix "$modpath" install --only=production --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
-                  log "fallback npm install --only=production succeeded for $modpath"
-                  rc=0
-                  chown_module "$modpath"
-                else
-                  log "all npm fallbacks failed for $modpath"
-                  rc=2
-                fi
+                log "All npm fallback strategies failed for $modpath"
+                rc=2
               fi
-            else
-              log "npm command failed for $modpath (non-unknown-command error)"
-              rc=2
             fi
+          else
+            log "npm command failed for $modpath (non-unknown-command error)"
+            rc=2
           fi
-          rm -f "$tmpout"
-          return $rc
-        }
+        fi
+        
+        rm -f "$tmpout"
+        return $rc
+      }
 
+      # Execute npm with appropriate command and fallback
+      if [ -n "$npm_special_cmd" ]; then
+        # Use specified command with fallback support
         if run_npm_with_fallback "$mod" "$npm_special_cmd"; then
           updated_any=true
         else
           log "npm ($npm_special_cmd) ultimately failed for $name"
         fi
       else
-        # Prefer npm ci if package-lock.json exists for deterministic installs
+        # Universal strategy: prefer npm ci with lockfile, otherwise install
         if [ -f "$mod/package-lock.json" ]; then
-          log "Using npm ci (lockfile present)"
-          if npm_exec --prefix "$mod" ci --no-audit --no-fund 2>&1 | tee -a "$LOG_FILE"; then
-            log "npm ci succeeded for $name"
+          log "Universal strategy: Using npm ci (lockfile present)"
+          if run_npm_with_fallback "$mod" "ci"; then
             updated_any=true
-            chown_module "$mod"
           else
-            log "npm ci failed for $name"
+            log "npm ci with fallbacks failed for $name"
           fi
         else
-          if npm_exec --prefix "$mod" install --no-audit --no-fund 2>&1 | tee -a "$LOG_FILE"; then
-            log "npm install succeeded for $name"
+          log "Universal strategy: Using npm install (no lockfile)"
+          if run_npm_with_fallback "$mod" "install"; then
             updated_any=true
-            chown_module "$mod"
           else
-            log "npm install failed for $name"
+            log "npm install with fallbacks failed for $name"
           fi
         fi
       fi
