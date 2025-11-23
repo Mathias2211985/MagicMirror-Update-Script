@@ -282,8 +282,10 @@ for mod in "$MODULES_DIR"/*; do
           fi
           git clean -fdx 2>&1 | tee -a "$LOG_FILE" || true
           # attempt pull after discarding
+          module_git_updated=false
           if git_pull_with_retry; then
             updated_any=true
+            module_git_updated=true
           else
             rc=$?
             if [ $rc -eq 1 ]; then
@@ -300,8 +302,10 @@ for mod in "$MODULES_DIR"/*; do
       if [ "$DRY_RUN" = true ]; then
         log "(dry) would run: git fetch --all --prune && git pull --ff-only (with lock/retry handling)"
       else
+        module_git_updated=false
         if git_pull_with_retry; then
           updated_any=true
+          module_git_updated=true
         else
           # if return code 1 -> up-to-date; 2 -> error/skip
           rc=$?
@@ -321,12 +325,30 @@ for mod in "$MODULES_DIR"/*; do
   # 2) npm update/install if package.json exists
   if [ -f "$mod/package.json" ]; then
     log "package.json found — running npm (mode depends on module)"
+    
+    # Track if git updated this module
+    module_was_updated=false
+    if [ -d "$mod/.git" ]; then
+      # Check if we just updated via git (new_head is set from git_pull_with_retry)
+      if [ "${module_git_updated:-false}" = "true" ]; then
+        module_was_updated=true
+      fi
+    fi
+    
     # Determine if this module needs a special npm command (module-specific override)
     npm_special_cmd=""
     case "$name" in
       MMM-Webuntis)
         # Some npm versions do not support `--omit=dev`. Use a broader install to be compatible.
         npm_special_cmd="install --only=production"
+        ;;
+      MMM-RTSPStream)
+        # RTSPStream needs clean install after git updates to avoid dependency issues
+        npm_special_cmd="ci"
+        ;;
+      MMM-Fuel)
+        # Fuel module also benefits from clean install
+        npm_special_cmd="ci"
         ;;
       # add other module-specific overrides here, e.g.
       # MMM-Example)
@@ -529,6 +551,74 @@ if [ "$updated_any" = true ]; then
   fi
 else
   log "No updates were applied — no restart necessary"
+fi
+
+# Ensure pm2 autostart is configured after any updates
+log "Checking pm2 autostart configuration"
+if command -v pm2 >/dev/null 2>&1; then
+  # Clean up any errored pm2 processes first
+  if [ "$DRY_RUN" = true ]; then
+    log "(dry) would clean up errored pm2 processes"
+  else
+    errored_procs=$(pm2 jlist 2>/dev/null | jq -r '.[] | select(.pm2_env.status == "errored") | .name' 2>/dev/null || echo "")
+    if [ -n "$errored_procs" ]; then
+      log "Found errored pm2 processes, cleaning up: $errored_procs"
+      echo "$errored_procs" | while read -r proc; do
+        [ -n "$proc" ] && pm2 delete "$proc" 2>&1 | tee -a "$LOG_FILE" || true
+      done
+    fi
+  fi
+  
+  # Save current pm2 processes
+  if [ "$DRY_RUN" = true ]; then
+    log "(dry) would run: pm2 save"
+  else
+    pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
+  fi
+  
+  # Check if startup script is installed
+  startup_check=$(pm2 startup 2>&1 | grep -c "sudo env" || echo "0")
+  if [ "$startup_check" -gt 0 ]; then
+    log "pm2 startup not configured - showing startup command"
+    pm2 startup 2>&1 | tee -a "$LOG_FILE"
+    log "IMPORTANT: Run the sudo command shown above to enable pm2 autostart"
+  else
+    log "pm2 startup appears to be configured"
+    # Verify the startup script exists
+    if [ -f /etc/systemd/system/pm2-pi.service ] || [ -f /etc/systemd/system/pm2-$USER.service ]; then
+      log "pm2 systemd service found"
+      # Ensure service is enabled and running
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would check and enable pm2 systemd service"
+      else
+        sudo_prefix=$(apt_get_prefix)
+        if [ -n "$sudo_prefix" ]; then
+          log "Checking pm2-$USER service status:"
+          $sudo_prefix systemctl is-enabled pm2-$USER 2>&1 | tee -a "$LOG_FILE" || true
+          $sudo_prefix systemctl is-active pm2-$USER 2>&1 | tee -a "$LOG_FILE" || true
+          $sudo_prefix systemctl enable pm2-$USER 2>&1 | tee -a "$LOG_FILE" || log "Failed to enable pm2-$USER service"
+          
+          # Check if pm2 process is actually starting the right app
+          log "Current pm2 processes after startup check:"
+          pm2 list 2>&1 | tee -a "$LOG_FILE" || true
+          
+          # Check if MagicMirror process exists and is healthy
+          mm_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "(status|pid|uptime)" || echo "Process not found")
+          log "MagicMirror process status: $mm_status"
+          
+          # If process is errored or not found, try to restart
+          if pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -q "errored\|stopped"; then
+            log "MagicMirror process is errored/stopped, attempting restart"
+            pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE" || log "pm2 restart failed"
+          fi
+        fi
+      fi
+    else
+      log "pm2 systemd service not found - run 'pm2 startup' manually"
+    fi
+  fi
+else
+  log "pm2 not found - cannot configure autostart"
 fi
 
 log "Update run finished"
