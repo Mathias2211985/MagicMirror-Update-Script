@@ -67,6 +67,7 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 
 **Modul-spezifische Overrides** (nur für Sonderfälle):
 - **MMM-Webuntis**: Verwendet `npm install --only=production` wegen Kompatibilitätsproblemen mit sehr alten npm-Versionen
+- **MMM-RTSPStream & MMM-Fuel**: Bei Git-Updates wird `node_modules` vor `npm ci` komplett gelöscht für garantiert saubere Installation (verhindert Stream-/Dependency-Probleme)
 - Alle anderen Module nutzen die universelle Strategie automatisch
 
 Du musst **keine** modul-spezifischen Regeln mehr hinzufügen - das Skript passt sich automatisch an jedes Modul an!
@@ -138,8 +139,14 @@ Troubleshooting
   - Das Skript versucht automatisch 3 Fallback-Strategien
   - Manuelle Reparatur: `rm -rf node_modules package-lock.json && npm install` im Modul-Ordner
   - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde
+- **RTSP Stream zeigt nur "loading" nach Update**: 
+  - Das Skript löscht jetzt automatisch `node_modules` vor `npm ci` bei Git-Updates von RTSPStream
+  - Dies verhindert Dependency-Konflikte und stellt saubere Installation sicher
+  - Bei Problemen: Manuell `cd /home/pi/MagicMirror/modules/MMM-RTSPStream && rm -rf node_modules && npm ci`
+- **Fuel-Modul zeigt keine Daten nach Update**: 
+  - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates
+  - Manuelle Fix: `cd /home/pi/MagicMirror/modules/MMM-Fuel && rm -rf node_modules && npm install`
 - **npm-Befehl schlägt fehl**: Skript probiert automatisch Alternativen (ci → install → install --only=production)
-- **RTSP Stream / andere Module zeigen Fehler**: Nach Git-Updates verwendet das Skript automatisch `npm ci` für saubere Installation
 - **pm2 startet nicht automatisch**: Prüfe `sudo systemctl status pm2-pi` und ob `pm2 save` ausgeführt wurde
 - **npm Deprecation Warnings**: Normal bei älteren Modulen, funktionieren meist trotzdem
 - **Security Vulnerabilities**: Bei Dev-Dependencies in lokalen Modulen unkritisch, können ignoriert werden

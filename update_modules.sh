@@ -326,15 +326,6 @@ for mod in "$MODULES_DIR"/*; do
   if [ -f "$mod/package.json" ]; then
     log "package.json found — running npm (mode depends on module)"
     
-    # Track if git updated this module
-    module_was_updated=false
-    if [ -d "$mod/.git" ]; then
-      # Check if we just updated via git (new_head is set from git_pull_with_retry)
-      if [ "${module_git_updated:-false}" = "true" ]; then
-        module_was_updated=true
-      fi
-    fi
-    
     # Universal npm strategy: use npm ci for clean install if lockfile exists and module was git-updated
     # Otherwise use npm install for flexibility
     npm_special_cmd=""
@@ -343,6 +334,18 @@ for mod in "$MODULES_DIR"/*; do
     if [ "${module_git_updated:-false}" = "true" ] && [ -f "$mod/package-lock.json" ]; then
       npm_special_cmd="ci"
       log "Module was git-updated and has lockfile - using npm ci for clean install"
+      
+      # For modules that need extra cleanup after git updates, remove node_modules first
+      case "$name" in
+        MMM-RTSPStream|MMM-Fuel)
+          log "Module $name needs clean rebuild after git update - removing node_modules"
+          if [ "$DRY_RUN" = true ]; then
+            log "(dry) would run: rm -rf $mod/node_modules"
+          else
+            rm -rf "$mod/node_modules" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove node_modules for $name"
+          fi
+          ;;
+      esac
     fi
     
     # Module-specific overrides (only add if absolutely necessary for specific modules)
