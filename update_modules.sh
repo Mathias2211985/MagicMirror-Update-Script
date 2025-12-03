@@ -202,10 +202,37 @@ backup_modules() {
   fi
 }
 
+# Kill any running ffmpeg processes for RTSPStream before updates to avoid conflicts
+kill_rtsp_ffmpeg_processes() {
+  local name="$1"
+  if [ "$name" = "MMM-RTSPStream" ]; then
+    log "Checking for running ffmpeg processes for RTSPStream..."
+    if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
+      log "Found running ffmpeg processes for RTSPStream - terminating them"
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would kill ffmpeg processes"
+      else
+        pkill -TERM -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || log "No ffmpeg processes to kill or pkill failed"
+        sleep 2
+        # Force kill if still running
+        if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
+          log "ffmpeg processes still running - force killing"
+          pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+      fi
+    else
+      log "No running ffmpeg processes found for RTSPStream"
+    fi
+  fi
+}
+
 for mod in "$MODULES_DIR"/*; do
   [ -d "$mod" ] || continue
   name=$(basename "$mod")
   log "--- Processing module: $name ---"
+  
+  # Kill ffmpeg processes before updating RTSPStream
+  kill_rtsp_ffmpeg_processes "$name"
 
   # 1) Git update if repo
   if [ -d "$mod/.git" ]; then
@@ -335,9 +362,20 @@ for mod in "$MODULES_DIR"/*; do
       npm_special_cmd="ci"
       log "Module was git-updated and has lockfile - using npm ci for clean install"
       
-      # For modules that need extra cleanup after git updates, remove node_modules first
+      # For modules that need extra cleanup after git updates, remove node_modules AND package-lock for complete rebuild
       case "$name" in
-        MMM-RTSPStream|MMM-Fuel)
+        MMM-RTSPStream)
+          log "Module $name needs COMPLETE clean rebuild after git update - removing node_modules and package-lock.json"
+          if [ "$DRY_RUN" = true ]; then
+            log "(dry) would run: rm -rf $mod/node_modules $mod/package-lock.json"
+          else
+            rm -rf "$mod/node_modules" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove node_modules for $name"
+            rm -f "$mod/package-lock.json" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove package-lock.json for $name"
+            log "Forcing fresh npm install for RTSPStream (no cache)"
+            npm_special_cmd="install --no-save --loglevel=verbose"
+          fi
+          ;;
+        MMM-Fuel)
           log "Module $name needs clean rebuild after git update - removing node_modules"
           if [ "$DRY_RUN" = true ]; then
             log "(dry) would run: rm -rf $mod/node_modules"
@@ -558,6 +596,14 @@ if [ "$updated_any" = true ]; then
   log "Updates detected"
   if [ "$RESTART_AFTER_UPDATES" = true ]; then
     log "Updates applied - system will reboot to ensure all modules (especially RTSPStream) start correctly"
+    
+    # Check ffmpeg availability before reboot (important for RTSPStream)
+    if command -v ffmpeg >/dev/null 2>&1; then
+      ffmpeg_ver=$(ffmpeg -version 2>&1 | head -n 1 || echo "unknown")
+      log "ffmpeg is available: $ffmpeg_ver"
+    else
+      log "WARNING: ffmpeg not found in PATH - RTSPStream will not work!"
+    fi
     
     # Save pm2 processes before reboot
     if command -v pm2 >/dev/null 2>&1; then

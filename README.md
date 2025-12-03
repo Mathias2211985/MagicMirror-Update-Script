@@ -143,11 +143,10 @@ pm2 startup
 # sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u pi --hp /home/pi
 
 # Aktuelle Prozesse speichern
-- **RTSP Stream zeigt nur "loading" nach Update**: 
-  - Das Skript startet nach Updates den **gesamten Pi neu** (kein pm2-Restart), damit RTSPStream sauber startet
-  - Bei Git-Updates wird `node_modules` vor `npm ci` automatisch gelöscht für saubere Installation
-  - Der komplette Neustart verhindert Timing-Probleme bei der Stream-Initialisierung
-  - Bei Problemen: Manuell `cd /home/pi/MagicMirror/modules/MMM-RTSPStream && rm -rf node_modules && npm ci && sudo reboot`
+pm2 save
+
+# pm2 Service aktivieren
+sudo systemctl enable pm2-pi
 sudo systemctl start pm2-pi
 
 # Status prüfen
@@ -161,9 +160,8 @@ Troubleshooting
   - Manuelle Reparatur: `rm -rf node_modules package-lock.json && npm install` im Modul-Ordner
   - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde
 - **RTSP Stream zeigt nur "loading" nach Update**: 
-  - Das Skript löscht jetzt automatisch `node_modules` vor `npm ci` bei Git-Updates von RTSPStream
-  - Dies verhindert Dependency-Konflikte und stellt saubere Installation sicher
-  - Bei Problemen: Manuell `cd /home/pi/MagicMirror/modules/MMM-RTSPStream && rm -rf node_modules && npm ci`
+  - Siehe oben - das Skript behandelt RTSPStream jetzt mit vollständigem Cleanup und ffmpeg-Prozess-Beendigung
+  - Das Script prüft auch die ffmpeg-Verfügbarkeit vor dem Reboot und loggt die Version
 - **Fuel-Modul zeigt keine Daten nach Update**: 
   - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates
   - Manuelle Fix: `cd /home/pi/MagicMirror/modules/MMM-Fuel && rm -rf node_modules && npm install`
