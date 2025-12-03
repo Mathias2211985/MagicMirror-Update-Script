@@ -19,10 +19,10 @@ chmod +x ~/scripts/update_modules.sh
 2) Edit configuration at the top of `update_modules.sh`:
 - `MODULES_DIR` — Pfad zu deinem MagicMirror `modules` Ordner (z. B. `/home/pi/MagicMirror/modules`).
 - `PM2_PROCESS_NAME` — Name des pm2-Prozesses (z. B. `MagicMirror`).
-- `RESTART_AFTER_UPDATES` — `true` oder `false` (ob pm2 nach Updates neu gestartet werden soll).
+- `RESTART_AFTER_UPDATES` — `true` oder `false` (ob der Pi nach Updates neu gestartet werden soll).
 - `DRY_RUN` — `true` um zuerst eine Simulation zu fahren (keine Änderungen, kein Reboot).
 - `AUTO_DISCARD_LOCAL` — `true` (Standard) verwirft automatisch lokale Änderungen in Git-Repos.
-- `RUN_RASPBIAN_UPDATE` — `true` (Standard) führt apt-get full-upgrade nach Modul-Updates aus.
+- `RUN_RASPBIAN_UPDATE` — `true` (Standard) führt `apt-get update` und `apt-get full-upgrade` nach Modul-Updates aus.
 - `AUTO_REBOOT_AFTER_SCRIPT` — `true` (Standard) rebootet den Pi nach Skript-Ende (wird bei DRY_RUN übersprungen).
 - `LOG_FILE` — Pfad zur Log-Datei (Standard: `$HOME/update_modules.log`).
 
@@ -41,12 +41,16 @@ DRY_RUN=true ~/scripts/update_modules.sh
 ```
 
 Cron / Timer
-Wenn dein Mirror bereits zweimal täglich neu startet und du das Update während der Neustarts ausführen möchtest, plane den Cron-Job so, dass das Update kurz vor dem Restart läuft.
+Das Skript kann automatisch per Cron-Job zweimal täglich ausgeführt werden. Nach erfolgreichen Updates startet der Pi automatisch neu.
 
 Beispiel crontab (editiere mit `crontab -e`):
-# Ausführung täglich um 02:50 und 14:50 — passe Zeiten an deine PM2-Restarts an
+```bash
+# Ausführung täglich um 02:50 und 14:50 — nach Updates erfolgt automatischer Neustart
 50 2 * * * /home/pi/scripts/update_modules.sh >> /home/pi/update_modules.log 2>&1
 50 14 * * * /home/pi/scripts/update_modules.sh >> /home/pi/update_modules.log 2>&1
+```
+
+**Wichtig**: Das Skript führt bei Updates automatisch einen **kompletten System-Neustart** durch, um sicherzustellen, dass alle Module (insbesondere RTSPStream) sauber neu starten.
 
 Alternativ: systemd-timer (wenn bevorzugt) — ich kann das für dich erstellen, wenn du möchtest.
 
@@ -69,28 +73,44 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 - **MMM-Webuntis**: Verwendet `npm install --only=production` wegen Kompatibilitätsproblemen mit sehr alten npm-Versionen
 - **MMM-RTSPStream & MMM-Fuel**: Bei Git-Updates wird `node_modules` vor `npm ci` komplett gelöscht für garantiert saubere Installation (verhindert Stream-/Dependency-Probleme)
 - Alle anderen Module nutzen die universelle Strategie automatisch
-
-Du musst **keine** modul-spezifischen Regeln mehr hinzufügen - das Skript passt sich automatisch an jedes Modul an!
-
-
-Optionales Raspbian-Update (full-upgrade)
+Automatisches Raspbian-Update und System-Neustart
 ---------------------------------
-Das Skript kann optional nach den Modul-Updates ein komplettes, nicht-interaktives `apt-get full-upgrade` ausführen (empfohlen, wenn du Systempakete komplett aktuell halten willst). Standardmäßig ist diese Option aktiviert. Konfiguration in `update_modules.sh`:
+Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Update durch und startet den Raspberry Pi neu. Dieser Workflow ist standardmäßig aktiviert.
 
-```
-RUN_RASPBIAN_UPDATE=true
-MAKE_MODULE_BACKUP=true   # erstellt vorher ein tar.gz Backup des modules-Ordners
-AUTO_REBOOT_AFTER_UPGRADE=false
+**Update-Ablauf:**
+1. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module
+2. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
+3. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade
+4. **System-Neustart**: Kompletter Reboot des Pi nach erfolgreichen Updates
+
+Konfiguration in `update_modules.sh`:
+
+```bash
+RUN_RASPBIAN_UPDATE=true        # apt-get update + full-upgrade ausführen
+MAKE_MODULE_BACKUP=true         # Backup vor apt-upgrade erstellen
+RESTART_AFTER_UPDATES=true      # System-Neustart nach Updates
+AUTO_REBOOT_AFTER_SCRIPT=true   # Neustart am Skript-Ende (zusätzlich)
 ```
 
-Details und Hinweise:
+**Details und Hinweise:**
 - Das Skript verwendet `DEBIAN_FRONTEND=noninteractive` und `apt-get full-upgrade` mit Dpkg-Optionen, um interaktive Dialoge zu vermeiden.
 - Vor dem Upgrade wird (wenn aktiviert) ein komprimiertes Backup deines `modules`-Ordners nach `~/module_backups/` geschrieben.
-- `apt-get full-upgrade` ist mächtiger als `upgrade`: es kann Abhängigkeiten anlegen und Pakete entfernen. Daher ist ein Backup und ein kurzes Prüfintervall empfehlenswert.
-- Das Skript behandelt apt/dpkg-Locks mit einem Retry/Backoff-Mechanismus.
-- Falls ein Reboot erforderlich ist, wird das erkannt; das Skript kann optional automatisch rebooten (siehe `AUTO_REBOOT_AFTER_UPGRADE`). Standardmäßig bleibt das deaktiviert, da du sagtest, dass ein Reboot ohnehin extern erfolgt.
+- `apt-get full-upgrade` ist mächtiger als `upgrade`: es kann Abhängigkeiten anlegen und Pakete entfernen. Daher ist ein Backup empfehlenswert.
+- Das Skript behandelt apt/dpkg-Locks mit einem Retry/Backoff-Mechanismus (bis zu 4 Versuche).
+- Nach erfolgreichen Updates wird der **gesamte Pi neu gestartet** (kein pm2-Restart), damit alle Module inkl. RTSPStream sauber starten.
+- Bei `DRY_RUN=true` wird kein Reboot durchgeführt.
+
+**Warum kompletter System-Neustart?**
+- Stellt sicher, dass alle Module (besonders RTSPStream) komplett frisch starten
+- Vermeidet Timing-Probleme bei ffmpeg-Stream-Initialisierung
+- Aktiviert Kernel-Updates falls vorhanden
+- pm2 startet MagicMirror automatisch via systemd beim Bootvorgang
 
 Bevor du ein automatisches full-upgrade in Produktion nutzt, empfehle ich einen Dry‑Run:
+
+```bash
+DRY_RUN=true ~/scripts/update_modules.sh
+```or du ein automatisches full-upgrade in Produktion nutzt, empfehle ich einen Dry‑Run:
 
 ```
 DRY_RUN=true ~/scripts/update_modules.sh
@@ -123,10 +143,11 @@ pm2 startup
 # sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u pi --hp /home/pi
 
 # Aktuelle Prozesse speichern
-pm2 save
-
-# Service aktivieren
-sudo systemctl enable pm2-pi
+- **RTSP Stream zeigt nur "loading" nach Update**: 
+  - Das Skript startet nach Updates den **gesamten Pi neu** (kein pm2-Restart), damit RTSPStream sauber startet
+  - Bei Git-Updates wird `node_modules` vor `npm ci` automatisch gelöscht für saubere Installation
+  - Der komplette Neustart verhindert Timing-Probleme bei der Stream-Initialisierung
+  - Bei Problemen: Manuell `cd /home/pi/MagicMirror/modules/MMM-RTSPStream && rm -rf node_modules && npm ci && sudo reboot`
 sudo systemctl start pm2-pi
 
 # Status prüfen

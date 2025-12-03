@@ -61,7 +61,7 @@ chown_module() {
 if command -v npm >/dev/null 2>&1; then
   # prefer running npm with sudo when appropriate (some setups require sudo for global modules)
   npm_exec() {
-    # Always invoke npm via sudo when sudo exists (user requested this)
+    # Always invoke npm via sudo when sudo L (user requested this)
     if [ -n "$SUDO_CMD" ]; then
       $SUDO_CMD npm "$@"
     else
@@ -322,11 +322,11 @@ for mod in "$MODULES_DIR"/*; do
     log "Not a git repo"
   fi
 
-  # 2) npm update/install if package.json exists
+  # 2) npm update/install if package.json L
   if [ -f "$mod/package.json" ]; then
     log "package.json found — running npm (mode depends on module)"
     
-    # Universal npm strategy: use npm ci for clean install if lockfile exists and module was git-updated
+    # Universal npm strategy: use npm ci for clean install if lockfile L and module was git-updated
     # Otherwise use npm install for flexibility
     npm_special_cmd=""
     
@@ -394,7 +394,7 @@ for mod in "$MODULES_DIR"/*; do
           if grep -qi "Unknown command" "$tmpout" || grep -qi "unknown" "$tmpout"; then
             log "npm reported unknown command for '$cmd' - trying fallback strategies"
             
-            # Strategy 1: Try npm ci if lockfile exists
+            # Strategy 1: Try npm ci if lockfile L
             if [ -f "$modpath/package-lock.json" ]; then
               log "Fallback 1: Trying npm ci (lockfile present)"
               if npm_exec --prefix "$modpath" ci --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
@@ -557,23 +557,32 @@ fi
 if [ "$updated_any" = true ]; then
   log "Updates detected"
   if [ "$RESTART_AFTER_UPDATES" = true ]; then
-    log "Restarting pm2 process: $PM2_PROCESS_NAME"
+    log "Updates applied - system will reboot to ensure all modules (especially RTSPStream) start correctly"
+    
+    # Save pm2 processes before reboot
     if command -v pm2 >/dev/null 2>&1; then
-      if pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE"; then
-        log "pm2 restart succeeded"
-      else
-        log "pm2 restart FAILED — capturing 'pm2 list' for debugging"
-        pm2 list 2>&1 | tee -a "$LOG_FILE"
-        log "If the process name is different, set PM2_PROCESS_NAME in the script to the correct name. To see processes run: pm2 ls"
-      fi
+      log "Saving pm2 process list before reboot"
+      pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
+    fi
+    
+    # Reboot the system
+    sudo_prefix=$(apt_get_prefix)
+    log "Rebooting system now..."
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would reboot system now"
     else
-      log "pm2 not found in PATH — skipping restart"
+      sync  # Ensure all file system writes are completed
+      if [ -n "$sudo_prefix" ]; then
+        $sudo_prefix reboot || log "Reboot command failed"
+      else
+        reboot || log "Reboot command failed (no sudo available)"
+      fi
     fi
   else
-    log "RESTART_AFTER_UPDATES is false — not restarting pm2"
+    log "RESTART_AFTER_UPDATES is false — no reboot will be performed"
   fi
 else
-  log "No updates were applied — no restart necessary"
+  log "No updates were applied — no reboot necessary"
 fi
 
 # Ensure pm2 autostart is configured after any updates
@@ -607,7 +616,7 @@ if command -v pm2 >/dev/null 2>&1; then
     log "IMPORTANT: Run the sudo command shown above to enable pm2 autostart"
   else
     log "pm2 startup appears to be configured"
-    # Verify the startup script exists
+    # Verify the startup script L
     if [ -f /etc/systemd/system/pm2-pi.service ] || [ -f /etc/systemd/system/pm2-$USER.service ]; then
       log "pm2 systemd service found"
       # Ensure service is enabled and running
@@ -625,7 +634,7 @@ if command -v pm2 >/dev/null 2>&1; then
           log "Current pm2 processes after startup check:"
           pm2 list 2>&1 | tee -a "$LOG_FILE" || true
           
-          # Check if MagicMirror process exists and is healthy
+          # Check if MagicMirror process L and is healthy
           mm_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "(status|pid|uptime)" || echo "Process not found")
           log "MagicMirror process status: $mm_status"
           
