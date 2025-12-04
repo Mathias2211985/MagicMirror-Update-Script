@@ -17,7 +17,7 @@ AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änder
 LOG_FILE="$HOME/update_modules.log"
 RUN_RASPBIAN_UPDATE=true                      # true = run apt-get full-upgrade on the Raspberry Pi after module updates (requires sudo or root)
 MAKE_MODULE_BACKUP=true                       # true = create a tar.gz backup of the modules directory before apt upgrade
-AUTO_REBOOT_AFTER_UPGRADE=false               # true = reboot automatically after apt full-upgrade if required (we keep false by default)
+AUTO_REBOOT_AFTER_UPGRADE=true               # true = reboot automatically after apt full-upgrade if required (we keep false by default)
 AUTO_REBOOT_AFTER_SCRIPT=true                # true = reboot the Pi after the script finishes (regardless of success/failure). DRY_RUN overrides this.
 APT_UPDATE_MAX_ATTEMPTS=4                      # how many times to retry apt when dpkg/apt lock is present
 BACKUP_DIR="$HOME/module_backups"            # where to store module backups
@@ -371,8 +371,36 @@ for mod in "$MODULES_DIR"/*; do
           else
             rm -rf "$mod/node_modules" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove node_modules for $name"
             rm -f "$mod/package-lock.json" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove package-lock.json for $name"
-            log "Forcing fresh npm install for RTSPStream (no cache)"
-            npm_special_cmd="install --no-save --loglevel=verbose"
+            
+            # Verify ffmpeg installation and capabilities before npm install
+            log "Verifying ffmpeg installation for RTSPStream..."
+            if ! command -v ffmpeg >/dev/null 2>&1; then
+              log "ERROR: ffmpeg not found! Installing ffmpeg..."
+              sudo_prefix=$(apt_get_prefix)
+              if [ -n "$sudo_prefix" ]; then
+                $sudo_prefix apt-get update 2>&1 | tee -a "$LOG_FILE" || true
+                $sudo_prefix apt-get install -y ffmpeg 2>&1 | tee -a "$LOG_FILE" || log "Failed to install ffmpeg"
+              fi
+            else
+              ffmpeg_ver=$(ffmpeg -version 2>&1 | head -n 1 || echo "unknown")
+              log "ffmpeg found: $ffmpeg_ver"
+              
+              # Check for necessary ffmpeg codecs/formats
+              log "Checking ffmpeg capabilities for RTSP..."
+              if ! ffmpeg -formats 2>&1 | grep -q "rtsp"; then
+                log "WARNING: ffmpeg may not have RTSP support compiled in"
+              fi
+              if ! ffmpeg -codecs 2>&1 | grep -q "h264"; then
+                log "WARNING: ffmpeg may not have H.264 codec support"
+              fi
+            fi
+            
+            # Clean npm cache for this module to avoid any cached corruption
+            log "Clearing npm cache for RTSPStream..."
+            npm_exec cache clean --force 2>&1 | tee -a "$LOG_FILE" || log "npm cache clean failed"
+            
+            log "Forcing fresh npm install for RTSPStream with rebuild flags"
+            npm_special_cmd="install --no-save --build-from-source --loglevel=verbose"
           fi
           ;;
         MMM-Fuel)
@@ -505,6 +533,55 @@ for mod in "$MODULES_DIR"/*; do
     log "No package.json — skipping npm"
   fi
 
+  # Post-install fixes for specific modules
+  if [ "$name" = "MMM-RTSPStream" ] && [ -d "$mod/node_modules" ]; then
+    log "Running post-install verification for RTSPStream..."
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would verify RTSPStream installation"
+    else
+      # Verify node_helper.js exists and is executable
+      if [ -f "$mod/node_helper.js" ]; then
+        log "node_helper.js found for RTSPStream"
+        
+        # Check for common RTSPStream issues
+        if grep -q "omxplayer" "$mod/node_helper.js" 2>/dev/null; then
+          log "WARNING: RTSPStream config may reference omxplayer (deprecated on newer Pi OS)"
+        fi
+        
+        # Ensure proper permissions on the module directory
+        chown_module "$mod"
+        
+        # Test if ffmpeg can be called from Node.js context
+        log "Testing ffmpeg accessibility from Node.js..."
+        test_cmd="const { spawn } = require('child_process'); const proc = spawn('ffmpeg', ['-version']); proc.on('close', (code) => { process.exit(code); });"
+        if $SUDO_CMD -u "$CHOWN_USER" node -e "$test_cmd" 2>&1 | tee -a "$LOG_FILE"; then
+          log "ffmpeg is accessible from Node.js context"
+        else
+          log "WARNING: ffmpeg may not be accessible from Node.js - RTSPStream might fail"
+        fi
+        
+        # Kill any stale ffmpeg processes from previous runs
+        if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
+          log "Cleaning up stale ffmpeg processes..."
+          pkill -TERM -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+          sleep 1
+          pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+      else
+        log "ERROR: node_helper.js not found for RTSPStream after installation!"
+      fi
+      
+      # Verify package.json scripts are intact
+      if [ -f "$mod/package.json" ]; then
+        if ! grep -q "start" "$mod/package.json" 2>/dev/null; then
+          log "WARNING: RTSPStream package.json may be missing start script"
+        fi
+      fi
+      
+      log "RTSPStream post-install verification complete"
+    fi
+  fi
+  
   log "--- Done: $name ---"
 done
 
@@ -597,13 +674,79 @@ if [ "$updated_any" = true ]; then
   if [ "$RESTART_AFTER_UPDATES" = true ]; then
     log "Updates applied - system will reboot to ensure all modules (especially RTSPStream) start correctly"
     
+    # Comprehensive RTSPStream health check before reboot
+    log "=== RTSPStream Pre-Reboot Health Check ==="
+    
     # Check ffmpeg availability before reboot (important for RTSPStream)
     if command -v ffmpeg >/dev/null 2>&1; then
       ffmpeg_ver=$(ffmpeg -version 2>&1 | head -n 1 || echo "unknown")
-      log "ffmpeg is available: $ffmpeg_ver"
+      log "✓ ffmpeg is available: $ffmpeg_ver"
+      
+      # Check ffmpeg RTSP support
+      if ffmpeg -formats 2>&1 | grep -q "rtsp"; then
+        log "✓ ffmpeg has RTSP format support"
+      else
+        log "✗ WARNING: ffmpeg may lack RTSP support!"
+      fi
+      
+      # Check ffmpeg H.264 codec support (commonly used for RTSP streams)
+      if ffmpeg -codecs 2>&1 | grep -q "h264"; then
+        log "✓ ffmpeg has H.264 codec support"
+      else
+        log "✗ WARNING: ffmpeg may lack H.264 codec support!"
+      fi
     else
-      log "WARNING: ffmpeg not found in PATH - RTSPStream will not work!"
+      log "✗ CRITICAL: ffmpeg not found in PATH - RTSPStream will NOT work!"
+      log "  Installing ffmpeg now..."
+      sudo_prefix=$(apt_get_prefix)
+      if [ -n "$sudo_prefix" ]; then
+        $sudo_prefix apt-get update 2>&1 | tee -a "$LOG_FILE" || true
+        $sudo_prefix apt-get install -y ffmpeg 2>&1 | tee -a "$LOG_FILE" || log "Failed to install ffmpeg"
+      fi
     fi
+    
+    # Check if RTSPStream module L and is properly installed
+    rtsp_module="$MODULES_DIR/MMM-RTSPStream"
+    if [ -d "$rtsp_module" ]; then
+      log "✓ RTSPStream module directory exists"
+      
+      # Check critical files
+      if [ -f "$rtsp_module/node_helper.js" ]; then
+        log "✓ node_helper.js exists"
+      else
+        log "✗ CRITICAL: node_helper.js missing for RTSPStream!"
+      fi
+      
+      if [ -f "$rtsp_module/MMM-RTSPStream.js" ]; then
+        log "✓ MMM-RTSPStream.js exists"
+      else
+        log "✗ WARNING: MMM-RTSPStream.js missing!"
+      fi
+      
+      if [ -d "$rtsp_module/node_modules" ]; then
+        log "✓ node_modules directory exists"
+        # Count installed packages
+        pkg_count=$(find "$rtsp_module/node_modules" -maxdepth 1 -type d | wc -l)
+        log "  Found $pkg_count packages in node_modules"
+      else
+        log "✗ CRITICAL: node_modules directory missing for RTSPStream!"
+      fi
+      
+      # Check for stale ffmpeg processes
+      if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
+        log "✗ WARNING: Stale ffmpeg processes detected - cleaning up..."
+        pkill -TERM -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+        sleep 2
+        pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+        log "  Stale processes cleaned"
+      else
+        log "✓ No stale ffmpeg processes found"
+      fi
+    else
+      log "  RTSPStream module not installed (skipping checks)"
+    fi
+    
+    log "=== End RTSPStream Health Check ==="
     
     # Save pm2 processes before reboot
     if command -v pm2 >/dev/null 2>&1; then

@@ -71,7 +71,16 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 
 **Modul-spezifische Overrides** (nur für Sonderfälle):
 - **MMM-Webuntis**: Verwendet `npm install --only=production` wegen Kompatibilitätsproblemen mit sehr alten npm-Versionen
-- **MMM-RTSPStream & MMM-Fuel**: Bei Git-Updates wird `node_modules` vor `npm ci` komplett gelöscht für garantiert saubere Installation (verhindert Stream-/Dependency-Probleme)
+- **MMM-RTSPStream**: Spezielle Behandlung bei Git-Updates:
+  - Vollständige Bereinigung: `node_modules` und `package-lock.json` werden entfernt
+  - **ffmpeg-Überprüfung**: Automatische Installation falls ffmpeg fehlt
+  - **ffmpeg-Fähigkeiten**: Prüfung auf RTSP-Support und H.264-Codec
+  - **npm-Cache**: Wird vor Installation geleert
+  - **Native Module**: Installation mit `--build-from-source` Flag
+  - **Post-Install-Checks**: Überprüfung aller kritischen Dateien und ffmpeg-Zugriff aus Node.js
+  - **Prozess-Cleanup**: Beendigung veralteter ffmpeg-Prozesse vor und nach Updates
+  - **Pre-Reboot Health-Check**: Umfassende Überprüfung vor System-Neustart
+- **MMM-Fuel**: Bei Git-Updates wird `node_modules` vor `npm ci` komplett gelöscht
 - Alle anderen Module nutzen die universelle Strategie automatisch
 Automatisches Raspbian-Update und System-Neustart
 ---------------------------------
@@ -159,14 +168,52 @@ Troubleshooting
   - Das Skript versucht automatisch 3 Fallback-Strategien
   - Manuelle Reparatur: `rm -rf node_modules package-lock.json && npm install` im Modul-Ordner
   - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde
-- **RTSP Stream zeigt nur "loading" nach Update**: 
-  - Siehe oben - das Skript behandelt RTSPStream jetzt mit vollständigem Cleanup und ffmpeg-Prozess-Beendigung
-  - Das Script prüft auch die ffmpeg-Verfügbarkeit vor dem Reboot und loggt die Version
+
+- **RTSPStream zeigt nur "loading" oder funktioniert nach Update nicht**:
+  - **Automatische Fixes im Skript**:
+    - ✓ Vollständige Bereinigung von `node_modules` und `package-lock.json`
+    - ✓ Automatische ffmpeg-Installation falls nicht vorhanden
+    - ✓ Überprüfung von ffmpeg-Fähigkeiten (RTSP-Support, H.264-Codec)
+    - ✓ npm-Cache wird vor Installation geleert
+    - ✓ Installation mit `--build-from-source` für native Module
+    - ✓ Post-Install-Checks: Dateien, Berechtigungen, ffmpeg-Zugriff aus Node.js
+    - ✓ Beendigung veralteter ffmpeg-Prozesse (Port 9999)
+    - ✓ Pre-Reboot Health-Check mit detailliertem Status (✓/✗)
+  - **Log-Überprüfung**: `cat ~/update_modules.log | grep -A 20 "RTSPStream"` zeigt alle Checks
+  - **Manuelle Überprüfung**:
+    ```bash
+    # ffmpeg testen
+    ffmpeg -version
+    ffmpeg -formats 2>&1 | grep rtsp
+    ffmpeg -codecs 2>&1 | grep h264
+    
+    # RTSPStream neu installieren
+    cd /home/pi/MagicMirror/modules/MMM-RTSPStream
+    rm -rf node_modules package-lock.json
+    npm cache clean --force
+    npm install --build-from-source
+    
+    # Veraltete ffmpeg-Prozesse beenden
+    pkill -f "ffmpeg.*9999"
+    ```
+  - **Config-Überprüfung**: Stelle sicher, dass deine `config.js` gültige RTSP-URLs enthält
+  - **Port-Konflikt**: Prüfe, ob Port 9999 bereits belegt ist: `netstat -tuln | grep 9999`
+
 - **Fuel-Modul zeigt keine Daten nach Update**: 
   - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates
   - Manuelle Fix: `cd /home/pi/MagicMirror/modules/MMM-Fuel && rm -rf node_modules && npm install`
+
 - **npm-Befehl schlägt fehl**: Skript probiert automatisch Alternativen (ci → install → install --only=production)
+
 - **pm2 startet nicht automatisch**: Prüfe `sudo systemctl status pm2-pi` und ob `pm2 save` ausgeführt wurde
+
 - **npm Deprecation Warnings**: Normal bei älteren Modulen, funktionieren meist trotzdem
+
 - **Security Vulnerabilities**: Bei Dev-Dependencies in lokalen Modulen unkritisch, können ignoriert werden
+
 - **Neues Modul aktualisieren**: Keine Konfiguration nötig - läuft automatisch mit der universellen Strategie
+
+- **ffmpeg fehlt oder funktioniert nicht**:
+  - Das Skript installiert ffmpeg automatisch falls nicht vorhanden
+  - Manuelle Installation: `sudo apt-get update && sudo apt-get install -y ffmpeg`
+  - Überprüfung: `which ffmpeg && ffmpeg -version`
