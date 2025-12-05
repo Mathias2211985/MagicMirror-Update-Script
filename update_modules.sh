@@ -543,6 +543,39 @@ for mod in "$MODULES_DIR"/*; do
       if [ -f "$mod/node_helper.js" ]; then
         log "node_helper.js found for RTSPStream"
         
+        # Check for critical npm dependencies that RTSPStream needs
+        log "Checking critical RTSPStream dependencies..."
+        critical_deps_missing=false
+        
+        # Check for datauri module (commonly missing after updates)
+        if [ ! -d "$mod/node_modules/datauri" ]; then
+          log "CRITICAL: datauri module missing - installing now..."
+          critical_deps_missing=true
+        fi
+        
+        # Check for other critical dependencies
+        for dep in "node-ffmpeg-stream" "express"; do
+          if [ ! -d "$mod/node_modules/$dep" ]; then
+            log "WARNING: $dep module missing"
+            critical_deps_missing=true
+          fi
+        done
+        
+        # If critical dependencies are missing, reinstall
+        if [ "$critical_deps_missing" = true ]; then
+          log "Critical dependencies missing - running npm install to fix..."
+          pushd "$mod" >/dev/null
+          if npm_exec install 2>&1 | tee -a "$LOG_FILE"; then
+            log "Successfully reinstalled RTSPStream dependencies"
+            chown_module "$mod"
+          else
+            log "ERROR: Failed to install missing RTSPStream dependencies"
+          fi
+          popd >/dev/null
+        else
+          log "✓ All critical RTSPStream dependencies present"
+        fi
+        
         # Check for common RTSPStream issues
         if grep -q "omxplayer" "$mod/node_helper.js" 2>/dev/null; then
           log "WARNING: RTSPStream config may reference omxplayer (deprecated on newer Pi OS)"
@@ -555,10 +588,20 @@ for mod in "$MODULES_DIR"/*; do
         log "Testing ffmpeg accessibility from Node.js..."
         test_cmd="const { spawn } = require('child_process'); const proc = spawn('ffmpeg', ['-version']); proc.on('close', (code) => { process.exit(code); });"
         if $SUDO_CMD -u "$CHOWN_USER" node -e "$test_cmd" 2>&1 | tee -a "$LOG_FILE"; then
-          log "ffmpeg is accessible from Node.js context"
+          log "✓ ffmpeg is accessible from Node.js context"
         else
-          log "WARNING: ffmpeg may not be accessible from Node.js - RTSPStream might fail"
+          log "✗ WARNING: ffmpeg may not be accessible from Node.js - RTSPStream might fail"
         fi
+        
+        # Verify required Node.js modules can be loaded
+        log "Testing if datauri module can be loaded..."
+        test_cmd="try { require('datauri'); console.log('datauri OK'); process.exit(0); } catch(e) { console.error('datauri FAIL:', e.message); process.exit(1); }"
+        if cd "$mod" && node -e "$test_cmd" 2>&1 | tee -a "$LOG_FILE"; then
+          log "✓ datauri module loads successfully"
+        else
+          log "✗ ERROR: datauri module cannot be loaded - RTSPStream will fail!"
+        fi
+        cd - >/dev/null
         
         # Kill any stale ffmpeg processes from previous runs
         if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
@@ -568,7 +611,7 @@ for mod in "$MODULES_DIR"/*; do
           pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
         fi
       else
-        log "ERROR: node_helper.js not found for RTSPStream after installation!"
+        log "✗ ERROR: node_helper.js not found for RTSPStream after installation!"
       fi
       
       # Verify package.json scripts are intact

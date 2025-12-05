@@ -72,11 +72,16 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 **Modul-spezifische Overrides** (nur für Sonderfälle):
 - **MMM-Webuntis**: Verwendet `npm install --only=production` wegen Kompatibilitätsproblemen mit sehr alten npm-Versionen
 - **MMM-RTSPStream**: Spezielle Behandlung bei Git-Updates:
-  - Vollständige Bereinigung: `node_modules` und `package-lock.json` werden entfernt
+  - **Vollständige Bereinigung**: `node_modules` und `package-lock.json` werden entfernt
   - **ffmpeg-Überprüfung**: Automatische Installation falls ffmpeg fehlt
   - **ffmpeg-Fähigkeiten**: Prüfung auf RTSP-Support und H.264-Codec
   - **npm-Cache**: Wird vor Installation geleert
   - **Native Module**: Installation mit `--build-from-source` Flag
+  - **Dependency-Checks**: Automatische Überprüfung kritischer Pakete nach npm install:
+    - `datauri` (häufigste Fehlerquelle - wird automatisch nachinstalliert falls fehlend)
+    - `node-ffmpeg-stream` (für ffmpeg-Integration)
+    - `express` (für Webserver-Funktionalität)
+  - **Module-Load-Test**: Verifiziert, dass `datauri` tatsächlich geladen werden kann
   - **Post-Install-Checks**: Überprüfung aller kritischen Dateien und ffmpeg-Zugriff aus Node.js
   - **Prozess-Cleanup**: Beendigung veralteter ffmpeg-Prozesse vor und nach Updates
   - **Pre-Reboot Health-Check**: Umfassende Überprüfung vor System-Neustart
@@ -176,10 +181,23 @@ Troubleshooting
     - ✓ Überprüfung von ffmpeg-Fähigkeiten (RTSP-Support, H.264-Codec)
     - ✓ npm-Cache wird vor Installation geleert
     - ✓ Installation mit `--build-from-source` für native Module
+    - ✓ **Automatische Überprüfung kritischer Abhängigkeiten** (`datauri`, `node-ffmpeg-stream`, `express`)
+    - ✓ **Automatische Nachinstallation fehlender Pakete** nach Updates
+    - ✓ **Test ob `datauri`-Modul geladen werden kann** (häufigste Fehlerquelle)
     - ✓ Post-Install-Checks: Dateien, Berechtigungen, ffmpeg-Zugriff aus Node.js
     - ✓ Beendigung veralteter ffmpeg-Prozesse (Port 9999)
     - ✓ Pre-Reboot Health-Check mit detailliertem Status (✓/✗)
   - **Log-Überprüfung**: `cat ~/update_modules.log | grep -A 20 "RTSPStream"` zeigt alle Checks
+  - **Häufigste Fehlerursache**: Fehlendes `datauri`-Modul
+    - **Symptom**: `Cannot find module 'datauri'` in pm2 logs
+    - **Automatische Lösung**: Skript erkennt und installiert fehlende Abhängigkeiten
+    - **Manuelle Lösung**:
+      ```bash
+      cd /home/pi/MagicMirror/modules/MMM-RTSPStream
+      sudo npm install datauri --save
+      sudo chown -R pi:pi .
+      pm2 restart MagicMirror
+      ```
   - **Manuelle Überprüfung**:
     ```bash
     # ffmpeg testen
@@ -187,14 +205,23 @@ Troubleshooting
     ffmpeg -formats 2>&1 | grep rtsp
     ffmpeg -codecs 2>&1 | grep h264
     
-    # RTSPStream neu installieren
+    # Kritische Abhängigkeiten prüfen
+    cd /home/pi/MagicMirror/modules/MMM-RTSPStream
+    ls -la node_modules/ | grep -E "datauri|node-ffmpeg-stream|express"
+    
+    # RTSPStream komplett neu installieren
     cd /home/pi/MagicMirror/modules/MMM-RTSPStream
     rm -rf node_modules package-lock.json
     npm cache clean --force
-    npm install --build-from-source
+    npm install
+    sudo chown -R pi:pi .
     
     # Veraltete ffmpeg-Prozesse beenden
     pkill -f "ffmpeg.*9999"
+    
+    # MagicMirror neu starten
+    pm2 restart MagicMirror
+    pm2 logs MagicMirror --lines 50
     ```
   - **Config-Überprüfung**: Stelle sicher, dass deine `config.js` gültige RTSP-URLs enthält
   - **Port-Konflikt**: Prüfe, ob Port 9999 bereits belegt ist: `netstat -tuln | grep 9999`
