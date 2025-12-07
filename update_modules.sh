@@ -688,6 +688,19 @@ if [ "$RUN_RASPBIAN_UPDATE" = true ]; then
   fi
   if apt_update_with_retry; then
     log "Raspbian packages updated successfully"
+    
+    # Clean apt cache after successful upgrade
+    log "Cleaning apt package cache..."
+    sudo_prefix=$(apt_get_prefix)
+    if [ -n "$sudo_prefix" ]; then
+      $sudo_prefix apt-get clean 2>&1 | tee -a "$LOG_FILE" || log "apt-get clean failed"
+      $sudo_prefix apt-get autoclean 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoclean failed"
+    else
+      apt-get clean 2>&1 | tee -a "$LOG_FILE" || log "apt-get clean failed"
+      apt-get autoclean 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoclean failed"
+    fi
+    log "Apt cache cleaned"
+    
     # check for reboot requirement
     if [ -f /var/run/reboot-required ]; then
       log "Reboot required after apt upgrade"
