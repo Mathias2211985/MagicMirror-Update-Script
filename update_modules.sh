@@ -628,6 +628,18 @@ for mod in "$MODULES_DIR"/*; do
   log "--- Done: $name ---"
 done
 
+# Clean npm cache after all module updates to free up disk space
+log "Cleaning npm cache after module updates..."
+if [ "$DRY_RUN" = true ]; then
+  log "(dry) would run: npm cache clean --force"
+else
+  if npm_exec cache clean --force 2>&1 | tee -a "$LOG_FILE"; then
+    log "npm cache cleaned successfully"
+  else
+    log "npm cache clean failed (non-critical)"
+  fi
+fi
+
 # --- Module-specific post-update patches ---
 # For modules that are updated from upstream but need a local runtime safety patch
 # (because upstream code may call .stop() without guarding), apply an idempotent
