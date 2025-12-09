@@ -2,8 +2,19 @@ Update Modules Script for Raspberry Pi
 
 This folder contains a script to automatically update MagicMirror modules (git + npm) and optionally restart the pm2 process.
 
+**🆕 Verbesserte RTSPStream-Unterstützung (Dezember 2024)**
+- ✓ Erweiterte ffmpeg-Prozess-Erkennung (mehrere Muster)
+- ✓ Doppelte Überprüfung und Beendigung von Zombie-Prozessen
+- ✓ Verbesserte npm-Cache-Bereinigung (inkl. /tmp/npm-*)
+- ✓ Zusätzliche Dependency-Checks (url, fs, path)
+- ✓ Erweiterte ffmpeg-Diagnose (PATH, Berechtigungen)
+- ✓ Fallback npm install --force bei Problemen
+- ✓ Zwei neue Hilfsskripte: diagnose_rtspstream.sh und fix_rtspstream.sh
+
 Files
 - update_modules.sh — main script. Configure the variables at the top before use.
+- fix_rtspstream.sh — repair script specifically for MMM-RTSPStream issues
+- diagnose_rtspstream.sh — diagnostic script to check RTSPStream installation status
 
 Usage
 1) Copy to the Raspberry Pi, for example into `/home/pi/scripts/` and make executable:
@@ -39,6 +50,52 @@ DRY_RUN=true ~/scripts/update_modules.sh
 ```bash
 ~/scripts/update_modules.sh
 ```
+
+RTSPStream Spezial-Skripte
+Das Repository enthält zwei zusätzliche Skripte speziell für MMM-RTSPStream Probleme:
+
+**Diagnose-Skript (diagnose_rtspstream.sh)**
+Überprüft den aktuellen Zustand der RTSPStream Installation und zeigt alle relevanten Informationen an.
+
+```bash
+# Kopiere Skript auf den Pi und mache es ausführbar
+chmod +x ~/scripts/diagnose_rtspstream.sh
+
+# Führe Diagnose aus
+~/scripts/diagnose_rtspstream.sh
+```
+
+Das Skript prüft:
+- Modul-Installation und Dateien
+- Node.js Dependencies
+- ffmpeg Installation und RTSP/H.264 Support
+- Laufende Prozesse (MagicMirror, ffmpeg)
+- Konfiguration in config.js
+- Netzwerk-Status (Port 9999)
+- System-Informationen
+- Letzte Log-Einträge
+
+**Reparatur-Skript (fix_rtspstream.sh)**
+Behebt automatisch die häufigsten RTSPStream-Probleme durch komplette Neuinstallation.
+
+```bash
+# Kopiere Skript auf den Pi und mache es ausführbar
+chmod +x ~/scripts/fix_rtspstream.sh
+
+# Führe Reparatur aus
+~/scripts/fix_rtspstream.sh
+```
+
+Das Skript führt folgende Schritte aus:
+1. Stoppt MagicMirror
+2. Beendet alle ffmpeg-Prozesse
+3. Prüft/installiert ffmpeg mit RTSP-Support
+4. Erstellt Backup der aktuellen Installation
+5. Löscht alte Installation (node_modules, package-lock.json)
+6. Bereinigt npm Cache
+7. Installiert RTSPStream komplett neu (mit Fallback-Strategien)
+8. Verifiziert Installation und Dependencies
+9. Startet MagicMirror neu
 
 Cron / Timer
 Das Skript kann automatisch per Cron-Job zweimal täglich ausgeführt werden. Nach erfolgreichen Updates startet der Pi automatisch neu.
@@ -198,33 +255,58 @@ Troubleshooting
       sudo chown -R pi:pi .
       pm2 restart MagicMirror
       ```
-  - **Manuelle Überprüfung**:
+  - **Schnelle Lösung - Reparatur-Skripte verwenden**:
+    ```bash
+    # Diagnose durchführen (zeigt Status und mögliche Probleme)
+    ~/scripts/diagnose_rtspstream.sh
+    
+    # Automatische Reparatur (behebt häufigste Probleme)
+    ~/scripts/fix_rtspstream.sh
+    ```
+  
+  - **Häufige Probleme und Lösungen**:
+    
+    1. **ffmpeg-Prozesse blockieren**: `pkill -KILL -f "ffmpeg" && pm2 restart MagicMirror`
+    
+    2. **ffmpeg fehlt/defekt**: `sudo apt-get install --reinstall -y ffmpeg`
+    
+    3. **Dependencies fehlen**: 
+       ```bash
+       cd /home/pi/MagicMirror/modules/MMM-RTSPStream
+       rm -rf node_modules package-lock.json
+       npm cache clean --force
+       npm install
+       sudo chown -R pi:pi .
+       ```
+    
+    4. **RTSP-URL nicht erreichbar**: `ffmpeg -i 'rtsp://ihre-kamera-ip:554/stream' -f null -`
+    
+    5. **Port 9999 belegt**: `netstat -tuln | grep 9999`
+  
+  - **Manuelle Komplettprüfung**:
     ```bash
     # ffmpeg testen
     ffmpeg -version
     ffmpeg -formats 2>&1 | grep rtsp
     ffmpeg -codecs 2>&1 | grep h264
     
-    # Kritische Abhängigkeiten prüfen
+    # Dependencies prüfen
     cd /home/pi/MagicMirror/modules/MMM-RTSPStream
     ls -la node_modules/ | grep -E "datauri|node-ffmpeg-stream|express"
     
-    # RTSPStream komplett neu installieren
-    cd /home/pi/MagicMirror/modules/MMM-RTSPStream
+    # Komplett neu installieren
     rm -rf node_modules package-lock.json
     npm cache clean --force
     npm install
     sudo chown -R pi:pi .
     
-    # Veraltete ffmpeg-Prozesse beenden
-    pkill -f "ffmpeg.*9999"
+    # ffmpeg-Prozesse beenden
+    pkill -KILL -f "ffmpeg"
     
     # MagicMirror neu starten
     pm2 restart MagicMirror
     pm2 logs MagicMirror --lines 50
     ```
-  - **Config-Überprüfung**: Stelle sicher, dass deine `config.js` gültige RTSP-URLs enthält
-  - **Port-Konflikt**: Prüfe, ob Port 9999 bereits belegt ist: `netstat -tuln | grep 9999`
 
 - **Fuel-Modul zeigt keine Daten nach Update**: 
   - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates

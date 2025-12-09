@@ -207,21 +207,41 @@ kill_rtsp_ffmpeg_processes() {
   local name="$1"
   if [ "$name" = "MMM-RTSPStream" ]; then
     log "Checking for running ffmpeg processes for RTSPStream..."
-    if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
-      log "Found running ffmpeg processes for RTSPStream - terminating them"
-      if [ "$DRY_RUN" = true ]; then
-        log "(dry) would kill ffmpeg processes"
-      else
-        pkill -TERM -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || log "No ffmpeg processes to kill or pkill failed"
-        sleep 2
-        # Force kill if still running
-        if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
-          log "ffmpeg processes still running - force killing"
-          pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+    # Check for various ffmpeg process patterns that RTSPStream might use
+    ffmpeg_patterns=("ffmpeg.*9999" "ffmpeg.*rtsp" "ffmpeg.*MMM-RTSPStream")
+    found_processes=false
+    
+    for pattern in "${ffmpeg_patterns[@]}"; do
+      if pgrep -f "$pattern" >/dev/null 2>&1; then
+        found_processes=true
+        log "Found running ffmpeg processes matching '$pattern' for RTSPStream - terminating them"
+        if [ "$DRY_RUN" = true ]; then
+          log "(dry) would kill ffmpeg processes matching '$pattern'"
+        else
+          pkill -TERM -f "$pattern" 2>&1 | tee -a "$LOG_FILE" || log "No ffmpeg processes to kill or pkill failed for pattern '$pattern'"
+          sleep 2
+          # Force kill if still running
+          if pgrep -f "$pattern" >/dev/null 2>&1; then
+            log "ffmpeg processes matching '$pattern' still running - force killing"
+            pkill -KILL -f "$pattern" 2>&1 | tee -a "$LOG_FILE" || true
+            sleep 1
+          fi
         fi
       fi
-    else
+    done
+    
+    if [ "$found_processes" = false ]; then
       log "No running ffmpeg processes found for RTSPStream"
+    else
+      # Give system time to clean up
+      sleep 2
+      # Verify all are gone
+      if pgrep -f "ffmpeg" >/dev/null 2>&1; then
+        log "WARNING: Some ffmpeg processes still running after cleanup attempt"
+        pgrep -af "ffmpeg" | tee -a "$LOG_FILE" || true
+      else
+        log "✓ All ffmpeg processes successfully terminated"
+      fi
     fi
   fi
 }
@@ -369,6 +389,14 @@ for mod in "$MODULES_DIR"/*; do
           if [ "$DRY_RUN" = true ]; then
             log "(dry) would run: rm -rf $mod/node_modules $mod/package-lock.json"
           else
+            # Double-check and kill any lingering ffmpeg processes
+            if pgrep -f "ffmpeg.*9999" >/dev/null 2>&1; then
+              log "WARNING: Found lingering ffmpeg processes - forcing termination"
+              pkill -KILL -f "ffmpeg.*9999" 2>&1 | tee -a "$LOG_FILE" || true
+              sleep 3
+            fi
+            
+            # Remove old installation completely
             rm -rf "$mod/node_modules" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove node_modules for $name"
             rm -f "$mod/package-lock.json" 2>&1 | tee -a "$LOG_FILE" || log "Failed to remove package-lock.json for $name"
             
@@ -395,9 +423,12 @@ for mod in "$MODULES_DIR"/*; do
               fi
             fi
             
-            # Clean npm cache for this module to avoid any cached corruption
+            # Clean npm cache globally and for this module to avoid any cached corruption
             log "Clearing npm cache for RTSPStream..."
             npm_exec cache clean --force 2>&1 | tee -a "$LOG_FILE" || log "npm cache clean failed"
+            
+            # Remove any npm temporary files
+            rm -rf /tmp/npm-* 2>/dev/null || true
             
             log "Forcing fresh npm install for RTSPStream with rebuild flags"
             npm_special_cmd="install --no-save --build-from-source --loglevel=verbose"
@@ -553,10 +584,10 @@ for mod in "$MODULES_DIR"/*; do
           critical_deps_missing=true
         fi
         
-        # Check for other critical dependencies
-        for dep in "node-ffmpeg-stream" "express"; do
-          if [ ! -d "$mod/node_modules/$dep" ]; then
-            log "WARNING: $dep module missing"
+        # Check for other critical dependencies (expanded list)
+        for dep in "node-ffmpeg-stream" "express" "url" "fs" "path"; do
+          if [ ! -d "$mod/node_modules/$dep" ] && ! node -e "require('$dep')" 2>/dev/null; then
+            log "WARNING: $dep module missing or not loadable"
             critical_deps_missing=true
           fi
         done
@@ -565,11 +596,19 @@ for mod in "$MODULES_DIR"/*; do
         if [ "$critical_deps_missing" = true ]; then
           log "Critical dependencies missing - running npm install to fix..."
           pushd "$mod" >/dev/null
+          # First try: regular install
           if npm_exec install 2>&1 | tee -a "$LOG_FILE"; then
             log "Successfully reinstalled RTSPStream dependencies"
             chown_module "$mod"
           else
-            log "ERROR: Failed to install missing RTSPStream dependencies"
+            log "ERROR: npm install failed - trying with --force flag..."
+            # Second try: force install
+            if npm_exec install --force 2>&1 | tee -a "$LOG_FILE"; then
+              log "Successfully force-installed RTSPStream dependencies"
+              chown_module "$mod"
+            else
+              log "ERROR: Failed to install missing RTSPStream dependencies even with --force"
+            fi
           fi
           popd >/dev/null
         else
@@ -591,6 +630,9 @@ for mod in "$MODULES_DIR"/*; do
           log "✓ ffmpeg is accessible from Node.js context"
         else
           log "✗ WARNING: ffmpeg may not be accessible from Node.js - RTSPStream might fail"
+          log "Checking ffmpeg path and permissions..."
+          which ffmpeg 2>&1 | tee -a "$LOG_FILE" || log "ffmpeg not in PATH"
+          ls -la "$(which ffmpeg 2>/dev/null)" 2>&1 | tee -a "$LOG_FILE" || log "Cannot stat ffmpeg"
         fi
         
         # Verify required Node.js modules can be loaded
