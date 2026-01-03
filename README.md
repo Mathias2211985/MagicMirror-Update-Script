@@ -28,7 +28,9 @@ chmod +x ~/scripts/update_modules.sh
 ```
 
 2) Edit configuration at the top of `update_modules.sh`:
+- `MAGICMIRROR_DIR` — Pfad zum MagicMirror-Hauptverzeichnis (z. B. `/home/pi/MagicMirror`).
 - `MODULES_DIR` — Pfad zu deinem MagicMirror `modules` Ordner (z. B. `/home/pi/MagicMirror/modules`).
+- `UPDATE_MAGICMIRROR_CORE` — `true` (Standard) aktualisiert MagicMirror Core vor den Modulen via `git pull && node --run install-mm`.
 - `PM2_PROCESS_NAME` — Name des pm2-Prozesses (z. B. `MagicMirror`).
 - `RESTART_AFTER_UPDATES` — `true` oder `false` (ob der Pi nach Updates neu gestartet werden soll).
 - `DRY_RUN` — `true` um zuerst eine Simulation zu fahren (keine Änderungen, kein Reboot).
@@ -111,6 +113,29 @@ Beispiel crontab (editiere mit `crontab -e`):
 
 Alternativ: systemd-timer (wenn bevorzugt) — ich kann das für dich erstellen, wenn du möchtest.
 
+MagicMirror Core Update
+---------------------------------
+Das Skript aktualisiert **automatisch den MagicMirror Core** vor den Modulen. Dies ist standardmäßig aktiviert.
+
+**Update-Ablauf:**
+1. Wechsel ins MagicMirror-Hauptverzeichnis (`MAGICMIRROR_DIR`)
+2. Prüfung auf lokale Änderungen (werden bei `AUTO_DISCARD_LOCAL=true` verworfen)
+3. `git pull` zum Aktualisieren des Core-Codes
+4. `node --run install-mm` zur Installation aller Abhängigkeiten
+
+Konfiguration in `update_modules.sh`:
+
+```bash
+UPDATE_MAGICMIRROR_CORE=true    # MagicMirror Core vor Modulen aktualisieren
+MAGICMIRROR_DIR="/home/pi/MagicMirror"  # Pfad zum MagicMirror-Hauptverzeichnis
+```
+
+**Wichtig:**
+- Das Core-Update erfolgt **vor** den Modul-Updates, um Kompatibilität sicherzustellen
+- Bei lokalen Änderungen im Core wird das Update übersprungen (außer `AUTO_DISCARD_LOCAL=true`)
+- Der Befehl `node --run install-mm` ist der offizielle Weg, um MagicMirror-Abhängigkeiten zu installieren
+- Falls der Core nicht aktualisiert werden soll, setze `UPDATE_MAGICMIRROR_CORE=false`
+
 Universelle Modul-Update-Strategie
 Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manuelle Konfiguration:
 
@@ -149,10 +174,11 @@ Automatisches Raspbian-Update und System-Neustart
 Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Update durch und startet den Raspberry Pi neu. Dieser Workflow ist standardmäßig aktiviert.
 
 **Update-Ablauf:**
-1. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module
-2. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
-3. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade
-4. **System-Neustart**: Kompletter Reboot des Pi nach erfolgreichen Updates
+1. **MagicMirror Core Update**: `git pull && node --run install-mm` im MagicMirror-Hauptverzeichnis
+2. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module
+3. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
+4. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade
+5. **System-Neustart**: Kompletter Reboot des Pi nach erfolgreichen Updates
 
 Konfiguration in `update_modules.sh`:
 

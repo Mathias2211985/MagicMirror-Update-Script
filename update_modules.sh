@@ -10,7 +10,9 @@ IFS=$'\n\t'
 
 # --- Konfiguration (anpassen) ---
 MODULES_DIR="/home/pi/MagicMirror/modules"   # Pfad zum modules-Ordner (z. B. /home/pi/MagicMirror/modules)
+MAGICMIRROR_DIR="/home/pi/MagicMirror"       # Pfad zum MagicMirror-Hauptverzeichnis
 PM2_PROCESS_NAME="MagicMirror"               # Name des pm2 Prozesses (z. B. 'MagicMirror')
+UPDATE_MAGICMIRROR_CORE=true                 # true = update MagicMirror core before updating modules
 RESTART_AFTER_UPDATES=true                   # true = restart pm2 process wenn Updates vorhanden
 DRY_RUN=false                                # true = nur berichten, nichts verändern
 AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änderungen verwerfen (reset --hard + clean) - DESTRUKTIV
@@ -178,6 +180,95 @@ if [ ! -d "$MODULES_DIR" ]; then
 fi
 
 updated_any=false
+
+# Update MagicMirror core before updating modules
+update_magicmirror_core() {
+  if [ "$UPDATE_MAGICMIRROR_CORE" != true ]; then
+    log "MagicMirror core update disabled (UPDATE_MAGICMIRROR_CORE != true)"
+    return 0
+  fi
+  
+  if [ ! -d "$MAGICMIRROR_DIR" ]; then
+    log "ERROR: MagicMirror directory '$MAGICMIRROR_DIR' does not exist - skipping core update"
+    return 1
+  fi
+  
+  log "=== Updating MagicMirror Core ==="
+  
+  if [ ! -d "$MAGICMIRROR_DIR/.git" ]; then
+    log "WARNING: '$MAGICMIRROR_DIR' is not a git repository - skipping core update"
+    return 1
+  fi
+  
+  pushd "$MAGICMIRROR_DIR" >/dev/null
+  
+  # Check for local changes in MagicMirror core
+  if [ -n "$(git status --porcelain)" ]; then
+    log "Local changes detected in MagicMirror core"
+    if [ "$AUTO_DISCARD_LOCAL" = true ]; then
+      log "AUTO_DISCARD_LOCAL=true — discarding local changes in MagicMirror core"
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would run: git fetch origin && git reset --hard origin/master && git clean -fdx"
+      else
+        git fetch origin --prune 2>&1 | tee -a "$LOG_FILE" || log "git fetch failed for MagicMirror core"
+        git reset --hard origin/master 2>&1 | tee -a "$LOG_FILE" || log "git reset failed for MagicMirror core"
+        git clean -fdx 2>&1 | tee -a "$LOG_FILE" || true
+      fi
+    else
+      log "Skipping MagicMirror core update due to local changes (set AUTO_DISCARD_LOCAL=true to overwrite)"
+      popd >/dev/null
+      return 1
+    fi
+  fi
+  
+  # Run git pull
+  if [ "$DRY_RUN" = true ]; then
+    log "(dry) would run: git pull && node --run install-mm"
+  else
+    log "Running: git pull"
+    local old_head new_head
+    old_head=$(git rev-parse --verify HEAD 2>/dev/null || echo "none")
+    
+    if git pull 2>&1 | tee -a "$LOG_FILE"; then
+      new_head=$(git rev-parse --verify HEAD 2>/dev/null || echo "none")
+      
+      if [ "$old_head" != "$new_head" ]; then
+        log "✓ MagicMirror core updated ($old_head -> $new_head)"
+        updated_any=true
+        
+        # Run node --run install-mm to install dependencies
+        log "Running: node --run install-mm"
+        if command -v node >/dev/null 2>&1; then
+          if node --run install-mm 2>&1 | tee -a "$LOG_FILE"; then
+            log "✓ MagicMirror dependencies installed successfully"
+            chown_module "$MAGICMIRROR_DIR"
+          else
+            log "ERROR: node --run install-mm failed for MagicMirror core"
+            popd >/dev/null
+            return 2
+          fi
+        else
+          log "ERROR: node not found in PATH - cannot install MagicMirror dependencies"
+          popd >/dev/null
+          return 2
+        fi
+      else
+        log "MagicMirror core is already up-to-date"
+      fi
+    else
+      log "ERROR: git pull failed for MagicMirror core"
+      popd >/dev/null
+      return 2
+    fi
+  fi
+  
+  popd >/dev/null
+  log "=== MagicMirror Core Update Complete ==="
+  return 0
+}
+
+# Update MagicMirror core before processing modules
+update_magicmirror_core
 
 # Backup modules directory before apt-upgrade
 backup_modules() {
