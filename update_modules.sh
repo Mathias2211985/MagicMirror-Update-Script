@@ -41,6 +41,95 @@ fi
 # user to own module files after npm (change if you use different user)
 CHOWN_USER="pi"
 
+# Check and install/update Node.js version if needed for MagicMirror
+check_and_update_nodejs() {
+  log "Checking Node.js version..."
+  
+  if ! command -v node >/dev/null 2>&1; then
+    log "ERROR: Node.js not found - cannot continue"
+    return 1
+  fi
+  
+  current_node_version=$(node --version | sed 's/v//')
+  log "Current Node.js version: v$current_node_version"
+  
+  # Check if version meets minimum requirements (>=22.21.1 or >=24)
+  # Extract major and minor version
+  node_major=$(echo "$current_node_version" | cut -d. -f1)
+  node_minor=$(echo "$current_node_version" | cut -d. -f2)
+  node_patch=$(echo "$current_node_version" | cut -d. -f3)
+  
+  needs_update=false
+  
+  if [ "$node_major" -lt 22 ]; then
+    needs_update=true
+    log "Node.js version too old (v$current_node_version < v22.21.1)"
+  elif [ "$node_major" -eq 22 ] && [ "$node_minor" -lt 21 ]; then
+    needs_update=true
+    log "Node.js v22 but version too old (v$current_node_version < v22.21.1)"
+  elif [ "$node_major" -eq 22 ] && [ "$node_minor" -eq 21 ] && [ "$node_patch" -lt 1 ]; then
+    needs_update=true
+    log "Node.js v22.21 but patch version too old (v$current_node_version < v22.21.1)"
+  elif [ "$node_major" -eq 23 ]; then
+    needs_update=true
+    log "Node.js v23 is not supported - need v22.21.1+ or v24+"
+  fi
+  
+  if [ "$needs_update" = true ]; then
+    log "Node.js update required for MagicMirror 2.34.0+"
+    
+    # Check if nvm is available
+    if [ -s "$HOME/.nvm/nvm.sh" ]; then
+      log "nvm detected - using nvm to install Node.js v24 (LTS)"
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would run: nvm install 24 && nvm use 24 && nvm alias default 24"
+        return 0
+      fi
+      # shellcheck disable=SC1091
+      source "$HOME/.nvm/nvm.sh"
+      nvm install 24 2>&1 | tee -a "$LOG_FILE"
+      nvm use 24 2>&1 | tee -a "$LOG_FILE"
+      nvm alias default 24 2>&1 | tee -a "$LOG_FILE"
+      log "✓ Node.js updated to $(node --version) via nvm"
+    else
+      log "nvm not found - installing nvm first"
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would install nvm and Node.js v24"
+        return 0
+      fi
+      
+      # Install nvm
+      log "Installing nvm..."
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash 2>&1 | tee -a "$LOG_FILE"
+      
+      # Load nvm into current shell
+      export NVM_DIR="$HOME/.nvm"
+      [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+      [ -s "$NVM_DIR/bash_completion" ] && source "$NVM_DIR/bash_completion"
+      
+      if command -v nvm >/dev/null 2>&1; then
+        log "✓ nvm installed successfully"
+        nvm install 24 2>&1 | tee -a "$LOG_FILE"
+        nvm use 24 2>&1 | tee -a "$LOG_FILE"
+        nvm alias default 24 2>&1 | tee -a "$LOG_FILE"
+        log "✓ Node.js updated to $(node --version)"
+      else
+        log "ERROR: nvm installation failed - please install manually:"
+        log "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash"
+        log "  source ~/.bashrc"
+        log "  nvm install 24"
+        log "  nvm use 24"
+        log "  nvm alias default 24"
+        return 1
+      fi
+    fi
+  else
+    log "✓ Node.js version is compatible (v$current_node_version)"
+  fi
+  
+  return 0
+}
+
 # chown helper: set ownership of a module directory back to $CHOWN_USER
 chown_module() {
   local target="$1"
@@ -179,6 +268,9 @@ if [ ! -d "$MODULES_DIR" ]; then
   exit 1
 fi
 
+# Check Node.js version before proceeding
+check_and_update_nodejs
+
 updated_any=false
 
 # Update MagicMirror core before updating modules
@@ -198,6 +290,30 @@ update_magicmirror_core() {
   if [ ! -d "$MAGICMIRROR_DIR/.git" ]; then
     log "WARNING: '$MAGICMIRROR_DIR' is not a git repository - skipping core update"
     return 1
+  fi
+  
+  # Backup config.js before update
+  local config_file="$MAGICMIRROR_DIR/config/config.js"
+  local config_backup="/tmp/magicmirror_config_backup_$(date +%Y%m%d_%H%M%S).js"
+  local config_restored=false
+  
+  if [ -f "$config_file" ]; then
+    log "Backing up config.js to $config_backup"
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would backup $config_file to $config_backup"
+    else
+      cp -p "$config_file" "$config_backup" 2>&1 | tee -a "$LOG_FILE"
+      if [ $? -eq 0 ]; then
+        log "✓ config.js backed up successfully"
+        # Also create a permanent backup in backup directory
+        mkdir -p "$BACKUP_DIR/config_backups" || true
+        cp -p "$config_file" "$BACKUP_DIR/config_backups/config_$(date +%Y%m%d_%H%M%S).js" 2>&1 | tee -a "$LOG_FILE" || log "Warning: Could not create permanent config backup"
+      else
+        log "Warning: Could not backup config.js"
+      fi
+    fi
+  else
+    log "Warning: config.js not found at $config_file - skipping backup"
   fi
   
   pushd "$MAGICMIRROR_DIR" >/dev/null
@@ -236,16 +352,48 @@ update_magicmirror_core() {
         log "✓ MagicMirror core updated ($old_head -> $new_head)"
         updated_any=true
         
+        # Clean install to ensure all dependencies (especially electron) are properly installed
+        log "Cleaning old node_modules and package-lock.json to ensure clean install"
+        if [ "$DRY_RUN" = false ]; then
+          rm -rf node_modules package-lock.json 2>&1 | tee -a "$LOG_FILE" || log "Warning: Could not remove node_modules/package-lock.json"
+        else
+          log "(dry) would remove node_modules and package-lock.json"
+        fi
+        
         # Run node --run install-mm to install dependencies
-        log "Running: node --run install-mm"
+        log "Running: node --run install-mm (with --engine-strict=false to bypass version checks)"
         if command -v node >/dev/null 2>&1; then
-          if node --run install-mm 2>&1 | tee -a "$LOG_FILE"; then
+          if npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || node --run install-mm 2>&1 | tee -a "$LOG_FILE"; then
             log "✓ MagicMirror dependencies installed successfully"
+            
+            # Verify that electron was installed correctly
+            if [ -f "./node_modules/.bin/electron" ]; then
+              log "✓ Electron binary verified at ./node_modules/.bin/electron"
+            else
+              log "WARNING: Electron binary not found, attempting fallback installation"
+              if npm install 2>&1 | tee -a "$LOG_FILE"; then
+                log "✓ Fallback npm install completed"
+                if [ -f "./node_modules/.bin/electron" ]; then
+                  log "✓ Electron now available after fallback"
+                else
+                  log "ERROR: Electron still missing after fallback - manual fix may be required"
+                fi
+              else
+                log "ERROR: Fallback npm install failed"
+              fi
+            fi
+            
             chown_module "$MAGICMIRROR_DIR"
           else
-            log "ERROR: node --run install-mm failed for MagicMirror core"
-            popd >/dev/null
-            return 2
+            log "ERROR: node --run install-mm failed, trying fallback npm install"
+            if npm install 2>&1 | tee -a "$LOG_FILE"; then
+              log "✓ Fallback npm install completed successfully"
+              chown_module "$MAGICMIRROR_DIR"
+            else
+              log "ERROR: Both node --run install-mm and npm install failed for MagicMirror core"
+              popd >/dev/null
+              return 2
+            fi
           fi
         else
           log "ERROR: node not found in PATH - cannot install MagicMirror dependencies"
@@ -262,8 +410,50 @@ update_magicmirror_core() {
     fi
   fi
   
+  # Restore config.js after update if it was backed up
+  if [ -f "$config_backup" ] && [ "$DRY_RUN" = false ]; then
+    log "Restoring config.js from backup"
+    if [ -f "$config_file" ]; then
+      # config.js exists after update - check if it's different from backup
+      if ! diff -q "$config_file" "$config_backup" >/dev/null 2>&1; then
+        log "Warning: config.js was modified during update - creating comparison backup"
+        cp -p "$config_file" "${config_file}.updated_$(date +%Y%m%d_%H%M%S)" 2>&1 | tee -a "$LOG_FILE" || true
+      fi
+    fi
+    
+    # Restore original config
+    cp -p "$config_backup" "$config_file" 2>&1 | tee -a "$LOG_FILE"
+    if [ $? -eq 0 ]; then
+      log "✓ config.js restored successfully"
+      config_restored=true
+      # Clean up temp backup after successful restore
+      rm -f "$config_backup" 2>&1 | tee -a "$LOG_FILE" || true
+    else
+      log "ERROR: Could not restore config.js from $config_backup - please restore manually!"
+    fi
+  elif [ ! -f "$config_file" ] && [ -f "$config_backup" ] && [ "$DRY_RUN" = false ]; then
+    # config.js missing after update but we have backup
+    log "Warning: config.js missing after update - restoring from backup"
+    mkdir -p "$(dirname "$config_file")" || true
+    cp -p "$config_backup" "$config_file" 2>&1 | tee -a "$LOG_FILE"
+    if [ $? -eq 0 ]; then
+      log "✓ config.js restored successfully"
+      config_restored=true
+      rm -f "$config_backup" 2>&1 | tee -a "$LOG_FILE" || true
+    else
+      log "ERROR: Could not restore config.js - backup is at $config_backup"
+    fi
+  fi
+  
   popd >/dev/null
   log "=== MagicMirror Core Update Complete ==="
+  
+  # Final check for config.js
+  if [ ! -f "$config_file" ]; then
+    log "ERROR: config.js is missing after update! Check $BACKUP_DIR/config_backups/ for backups"
+    return 2
+  fi
+  
   return 0
 }
 

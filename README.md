@@ -113,15 +113,55 @@ Beispiel crontab (editiere mit `crontab -e`):
 
 Alternativ: systemd-timer (wenn bevorzugt) — ich kann das für dich erstellen, wenn du möchtest.
 
+Node.js Versions-Management
+---------------------------------
+**Neu ab Januar 2026:** Das Skript prüft und aktualisiert automatisch Node.js, falls erforderlich.
+
+**MagicMirror 2.34.0+ benötigt:**
+- Node.js >= 22.21.1 (nicht v23)
+- ODER Node.js >= 24.x (empfohlen)
+
+**Automatische Node.js Installation:**
+Das Skript nutzt **nvm (Node Version Manager)** für kompatible Installation auf allen Architekturen (inkl. armhf/32-bit):
+
+1. Prüft aktuelle Node.js Version
+2. Installiert nvm falls nicht vorhanden
+3. Installiert Node.js v24 LTS via nvm
+4. Setzt v24 als Standard-Version
+
+**Manuelle Installation (falls gewünscht):**
+```bash
+# nvm installieren
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+source ~/.bashrc
+
+# Node.js v24 installieren
+nvm install 24
+nvm use 24
+nvm alias default 24
+
+# Prüfen
+node --version  # sollte v24.x.x zeigen
+```
+
+**Hinweis für 32-bit ARM (armhf):**
+NodeSource unterstützt armhf nicht mehr - daher verwendet das Skript nvm, was auf allen Architekturen funktioniert.
+
 MagicMirror Core Update
 ---------------------------------
 Das Skript aktualisiert **automatisch den MagicMirror Core** vor den Modulen. Dies ist standardmäßig aktiviert.
 
 **Update-Ablauf:**
-1. Wechsel ins MagicMirror-Hauptverzeichnis (`MAGICMIRROR_DIR`)
-2. Prüfung auf lokale Änderungen (werden bei `AUTO_DISCARD_LOCAL=true` verworfen)
-3. `git pull` zum Aktualisieren des Core-Codes
-4. `node --run install-mm` zur Installation aller Abhängigkeiten
+1. **Node.js Version-Check** und automatisches Update falls erforderlich
+2. **Backup der config.js** - Temporär und permanent gesichert
+3. Wechsel ins MagicMirror-Hauptverzeichnis (`MAGICMIRROR_DIR`)
+4. Prüfung auf lokale Änderungen (werden bei `AUTO_DISCARD_LOCAL=true` verworfen)
+5. `git pull` zum Aktualisieren des Core-Codes
+6. **Clean Install:** Löscht `node_modules` und `package-lock.json` für saubere Installation
+7. `npm install --engine-strict=false` zur Installation aller Abhängigkeiten (inkl. Electron)
+8. **Fallback-Mechanismus:** Bei Fehlern werden alternative Installationsmethoden versucht
+9. **Electron-Verifikation:** Prüft, ob Electron korrekt installiert wurde
+10. **Wiederherstellung der config.js** - Automatisch nach dem Update
 
 Konfiguration in `update_modules.sh`:
 
@@ -132,9 +172,26 @@ MAGICMIRROR_DIR="/home/pi/MagicMirror"  # Pfad zum MagicMirror-Hauptverzeichnis
 
 **Wichtig:**
 - Das Core-Update erfolgt **vor** den Modul-Updates, um Kompatibilität sicherzustellen
+- **config.js wird automatisch gesichert und wiederhergestellt** - sowohl temporär als auch permanent in `~/module_backups/config_backups/`
+- Node.js wird automatisch aktualisiert wenn Version nicht kompatibel ist
 - Bei lokalen Änderungen im Core wird das Update übersprungen (außer `AUTO_DISCARD_LOCAL=true`)
-- Der Befehl `node --run install-mm` ist der offizielle Weg, um MagicMirror-Abhängigkeiten zu installieren
+- Verwendet `--engine-strict=false` um Engine-Version-Konflikte zu umgehen
+- Clean Install verhindert "electron: not found" Fehler
 - Falls der Core nicht aktualisiert werden soll, setze `UPDATE_MAGICMIRROR_CORE=false`
+
+**config.js Schutz:**
+Das Skript sichert automatisch deine `config/config.js` vor dem Update:
+- **Temporäres Backup:** `/tmp/magicmirror_config_backup_TIMESTAMP.js` (wird nach Wiederherstellung gelöscht)
+- **Permanentes Backup:** `~/module_backups/config_backups/config_TIMESTAMP.js` (bleibt erhalten)
+- **Automatische Wiederherstellung:** Nach erfolgreichem Update wird die config.js automatisch wiederhergestellt
+- **Konflikt-Erkennung:** Wenn die config.js während des Updates geändert wurde, wird eine Vergleichskopie erstellt
+- **Fehlerfall:** Bei fehlender config.js nach Update erfolgt automatische Wiederherstellung aus Backup
+
+**Fehlerbehebung bei "electron: not found":**
+Das Skript behebt diesen Fehler automatisch durch:
+- Entfernen alter `node_modules` vor Installation
+- Mehrfache Fallback-Strategien bei Installationsfehlern
+- Verifikation der Electron-Installation nach dem Update
 
 Universelle Modul-Update-Strategie
 Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manuelle Konfiguration:
