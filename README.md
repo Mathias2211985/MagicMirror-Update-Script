@@ -2,6 +2,14 @@ Update Modules Script for Raspberry Pi
 
 This folder contains a script to automatically update MagicMirror modules (git + npm) and optionally restart the pm2 process.
 
+**🆕 Cron-Optimierungen (Januar 2026)**
+- ✓ Robustere Ausführung: set -u statt pipefail (einzelne Fehler stoppen nicht das Skript)
+- ✓ PATH für Cron-Jobs: node/npm/git werden automatisch gefunden
+- ✓ nvm-Unterstützung: Automatisches Laden in Cron-Umgebung
+- ✓ Intelligenter Reboot: Nur wenn Updates installiert wurden (nicht bei jedem Lauf)
+- ✓ Besseres Fehler-Handling: Modul-Fehler werden geloggt, Skript läuft weiter
+- ✓ Subshell-Isolation: Jedes Modul läuft isoliert vom Hauptskript
+
 **🆕 Verbesserte RTSPStream-Unterstützung (Dezember 2024)**
 - ✓ Erweiterte ffmpeg-Prozess-Erkennung (mehrere Muster)
 - ✓ Doppelte Überprüfung und Beendigung von Zombie-Prozessen
@@ -36,7 +44,8 @@ chmod +x ~/scripts/update_modules.sh
 - `DRY_RUN` — `true` um zuerst eine Simulation zu fahren (keine Änderungen, kein Reboot).
 - `AUTO_DISCARD_LOCAL` — `true` (Standard) verwirft automatisch lokale Änderungen in Git-Repos.
 - `RUN_RASPBIAN_UPDATE` — `true` (Standard) führt `apt-get update` und `apt-get full-upgrade` nach Modul-Updates aus.
-- `AUTO_REBOOT_AFTER_SCRIPT` — `true` (Standard) rebootet den Pi nach Skript-Ende (wird bei DRY_RUN übersprungen).
+- `AUTO_REBOOT_AFTER_SCRIPT` — `false` (Standard) rebootet **nicht** nach jedem Lauf (nur bei Updates).
+- `REBOOT_ONLY_ON_UPDATES` — `true` (Standard) rebootet **nur** wenn Updates installiert wurden.
 - `LOG_FILE` — Pfad zur Log-Datei (Standard: `$HOME/update_modules.log`).
 
 3) Dry-run testen:
@@ -102,6 +111,16 @@ Das Skript führt folgende Schritte aus:
 Cron / Timer
 Das Skript kann automatisch per Cron-Job zweimal täglich ausgeführt werden. Nach erfolgreichen Updates startet der Pi automatisch neu.
 
+**Cron-Optimierungen (Januar 2026):**
+Das Skript ist jetzt speziell für zuverlässige Cron-Ausführung optimiert:
+
+- **Robuste Fehlerbehandlung**: Einzelne Modul-Fehler stoppen nicht das gesamte Skript
+- **Automatischer PATH**: node, npm, git werden automatisch gefunden
+- **nvm-Unterstützung**: Node Version Manager wird automatisch geladen
+- **Intelligenter Reboot**: System startet nur neu wenn Updates installiert wurden
+- **Fehler-Logging**: Alle Fehler werden geloggt, Skript macht trotzdem weiter
+- **Modul-Isolation**: Jedes Modul läuft in eigener Subshell
+
 Beispiel crontab (editiere mit `crontab -e`):
 ```bash
 # Ausführung täglich um 02:50 und 14:50 — nach Updates erfolgt automatischer Neustart
@@ -109,7 +128,11 @@ Beispiel crontab (editiere mit `crontab -e`):
 50 14 * * * /home/pi/scripts/update_modules.sh >> /home/pi/update_modules.log 2>&1
 ```
 
-**Wichtig**: Das Skript führt bei Updates automatisch einen **kompletten System-Neustart** durch, um sicherzustellen, dass alle Module (insbesondere RTSPStream) sauber neu starten.
+**Wichtig**: 
+- Das Skript führt bei Updates automatisch einen **kompletten System-Neustart** durch
+- **Kein Neustart** wenn keine Updates gefunden wurden (`REBOOT_ONLY_ON_UPDATES=true`)
+- Alle Ausgaben werden nach `~/update_modules.log` geschrieben
+- Bei Problemen: Log prüfen mit `cat ~/update_modules.log`
 
 Alternativ: systemd-timer (wenn bevorzugt) — ich kann das für dich erstellen, wenn du möchtest.
 
@@ -179,13 +202,16 @@ MAGICMIRROR_DIR="/home/pi/MagicMirror"  # Pfad zum MagicMirror-Hauptverzeichnis
 - Clean Install verhindert "electron: not found" Fehler
 - Falls der Core nicht aktualisiert werden soll, setze `UPDATE_MAGICMIRROR_CORE=false`
 
-**config.js Schutz:**
-Das Skript sichert automatisch deine `config/config.js` vor dem Update:
-- **Temporäres Backup:** `/tmp/magicmirror_config_backup_TIMESTAMP.js` (wird nach Wiederherstellung gelöscht)
-- **Permanentes Backup:** `~/module_backups/config_backups/config_TIMESTAMP.js` (bleibt erhalten)
-- **Automatische Wiederherstellung:** Nach erfolgreichem Update wird die config.js automatisch wiederhergestellt
-- **Konflikt-Erkennung:** Wenn die config.js während des Updates geändert wurde, wird eine Vergleichskopie erstellt
-- **Fehlerfall:** Bei fehlender config.js nach Update erfolgt automatische Wiederherstellung aus Backup
+**config.js & custom.css Schutz:**
+Das Skript sichert automatisch deine `config/config.js` und `css/custom.css` vor dem Update:
+- **Temporäres Backup:** `/tmp/magicmirror_config_backup_TIMESTAMP.js` und `/tmp/magicmirror_custom_css_backup_TIMESTAMP.css` (werden nach Wiederherstellung gelöscht)
+- **Permanentes Backup:** 
+  - `~/module_backups/config_backups/config_TIMESTAMP.js` (bleibt erhalten)
+  - `~/module_backups/css_backups/custom_TIMESTAMP.css` (bleibt erhalten)
+- **Automatische Wiederherstellung:** Nach erfolgreichem Update werden beide Dateien automatisch wiederhergestellt
+- **Konflikt-Erkennung:** Wenn config.js oder custom.css während des Updates geändert wurden, wird eine Vergleichskopie erstellt
+- **Fehlerfall:** Bei fehlenden Dateien nach Update erfolgt automatische Wiederherstellung aus Backup
+- **Hinweis:** custom.css ist optional - fehlende Datei wird nur als Warnung geloggt
 
 **Fehlerbehebung bei "electron: not found":**
 Das Skript behebt diesen Fehler automatisch durch:
@@ -228,14 +254,14 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 - Alle anderen Module nutzen die universelle Strategie automatisch
 Automatisches Raspbian-Update und System-Neustart
 ---------------------------------
-Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Update durch und startet den Raspberry Pi neu. Dieser Workflow ist standardmäßig aktiviert.
+Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Update durch und startet den Raspberry Pi neu, **aber nur wenn Updates installiert wurden**.
 
 **Update-Ablauf:**
 1. **MagicMirror Core Update**: `git pull && node --run install-mm` im MagicMirror-Hauptverzeichnis
 2. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module
 3. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
 4. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade
-5. **System-Neustart**: Kompletter Reboot des Pi nach erfolgreichen Updates
+5. **System-Neustart**: Kompletter Reboot des Pi **nur wenn Updates installiert wurden**
 
 Konfiguration in `update_modules.sh`:
 
@@ -243,7 +269,8 @@ Konfiguration in `update_modules.sh`:
 RUN_RASPBIAN_UPDATE=true        # apt-get update + full-upgrade ausführen
 MAKE_MODULE_BACKUP=true         # Backup vor apt-upgrade erstellen
 RESTART_AFTER_UPDATES=true      # System-Neustart nach Updates
-AUTO_REBOOT_AFTER_SCRIPT=true   # Neustart am Skript-Ende (zusätzlich)
+AUTO_REBOOT_AFTER_SCRIPT=false  # NICHT bei jedem Lauf neustarten
+REBOOT_ONLY_ON_UPDATES=true     # Nur neustarten wenn Updates da sind (empfohlen für Cron)
 ```
 
 **Details und Hinweise:**
@@ -251,10 +278,11 @@ AUTO_REBOOT_AFTER_SCRIPT=true   # Neustart am Skript-Ende (zusätzlich)
 - Vor dem Upgrade wird (wenn aktiviert) ein komprimiertes Backup deines `modules`-Ordners nach `~/module_backups/` geschrieben.
 - `apt-get full-upgrade` ist mächtiger als `upgrade`: es kann Abhängigkeiten anlegen und Pakete entfernen. Daher ist ein Backup empfehlenswert.
 - Das Skript behandelt apt/dpkg-Locks mit einem Retry/Backoff-Mechanismus (bis zu 4 Versuche).
-- Nach erfolgreichen Updates wird der **gesamte Pi neu gestartet** (kein pm2-Restart), damit alle Module inkl. RTSPStream sauber starten.
+- **Intelligenter Reboot**: System startet nur neu wenn `updated_any=true` (Updates wurden installiert)
 - Bei `DRY_RUN=true` wird kein Reboot durchgeführt.
+- **Cron-freundlich**: Keine unnötigen Neustarts bei Cron-Jobs ohne Updates
 
-**Warum kompletter System-Neustart?**
+**Warum kompletter System-Neustart bei Updates?**
 - Stellt sicher, dass alle Module (besonders RTSPStream) komplett frisch starten
 - Vermeidet Timing-Probleme bei ffmpeg-Stream-Initialisierung
 - Aktiviert Kernel-Updates falls vorhanden

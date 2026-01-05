@@ -5,8 +5,20 @@
 # - npm install (wenn package.json vorhanden)
 # Optional: Neustart des pm2-Prozesses wenn Updates erfolgten
 
-set -euo pipefail
+# Only exit on undefined variables, but allow commands to fail
+# This makes the script robust for cron jobs - individual module failures won't stop the whole script
+set -u
 IFS=$'\n\t'
+
+# Set PATH for cron compatibility - ensures git, node, npm are found
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+
+# Load nvm if available (needed for cron jobs)
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  # shellcheck disable=SC1091
+  source "$NVM_DIR/nvm.sh" || true
+fi
 
 # --- Konfiguration (anpassen) ---
 MODULES_DIR="/home/pi/MagicMirror/modules"   # Pfad zum modules-Ordner (z. B. /home/pi/MagicMirror/modules)
@@ -19,10 +31,11 @@ AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änder
 LOG_FILE="$HOME/update_modules.log"
 RUN_RASPBIAN_UPDATE=true                      # true = run apt-get full-upgrade on the Raspberry Pi after module updates (requires sudo or root)
 MAKE_MODULE_BACKUP=true                       # true = create a tar.gz backup of the modules directory before apt upgrade
-AUTO_REBOOT_AFTER_UPGRADE=true               # true = reboot automatically after apt full-upgrade if required (we keep false by default)
-AUTO_REBOOT_AFTER_SCRIPT=true                # true = reboot the Pi after the script finishes (regardless of success/failure). DRY_RUN overrides this.
+AUTO_REBOOT_AFTER_UPGRADE=true               # true = reboot automatically after apt full-upgrade if required
+AUTO_REBOOT_AFTER_SCRIPT=false               # true = reboot the Pi after EVERY script run. false = only reboot when updates were installed. DRY_RUN overrides this.
 APT_UPDATE_MAX_ATTEMPTS=4                      # how many times to retry apt when dpkg/apt lock is present
 BACKUP_DIR="$HOME/module_backups"            # where to store module backups
+REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates were actually installed (more intelligent than AUTO_REBOOT_AFTER_SCRIPT)
 
 # -- Spezialfälle: manche Module sollen mit anderem npm-Befehl aktualisiert werden.
 # Hier per Modulname anpassen. Beispiel: MMM-Webuntis braucht `npm ci --omit=dev`.
@@ -242,17 +255,28 @@ on_exit_reboot() {
     return 0
   fi
 
-  if [ "${AUTO_REBOOT_AFTER_SCRIPT:-false}" != true ]; then
-    return 0
+  # Check if we should reboot
+  local should_reboot=false
+  
+  if [ "${AUTO_REBOOT_AFTER_SCRIPT:-false}" = true ]; then
+    log "AUTO_REBOOT_AFTER_SCRIPT=true — reboot will occur regardless of updates"
+    should_reboot=true
+  elif [ "${REBOOT_ONLY_ON_UPDATES:-true}" = true ] && [ "${updated_any:-false}" = true ]; then
+    log "REBOOT_ONLY_ON_UPDATES=true and updates were installed — reboot will occur"
+    should_reboot=true
   fi
-
-  log "AUTO_REBOOT_AFTER_SCRIPT=true — performing final reboot now (script exit code $rc)"
-  sudo_prefix=$(apt_get_prefix)
-  # call reboot via sudo if necessary; ignore any failure to avoid masking original exit status
-  if [ -n "$sudo_prefix" ]; then
-    $sudo_prefix reboot || log "reboot command failed (attempted: $sudo_prefix reboot)"
+  
+  if [ "$should_reboot" = true ]; then
+    log "Performing reboot now (script exit code $rc)"
+    sudo_prefix=$(apt_get_prefix)
+    # call reboot via sudo if necessary; ignore any failure to avoid masking original exit status
+    if [ -n "$sudo_prefix" ]; then
+      $sudo_prefix reboot || log "reboot command failed (attempted: $sudo_prefix reboot)"
+    else
+      reboot || log "reboot command failed (attempted: reboot)"
+    fi
   else
-    reboot || log "reboot command failed (attempted: reboot)"
+    log "No reboot necessary (no updates installed or AUTO_REBOOT_AFTER_SCRIPT=false)"
   fi
 }
 
@@ -292,10 +316,14 @@ update_magicmirror_core() {
     return 1
   fi
   
-  # Backup config.js before update
+  # Backup config.js and custom.css before update
   local config_file="$MAGICMIRROR_DIR/config/config.js"
   local config_backup="/tmp/magicmirror_config_backup_$(date +%Y%m%d_%H%M%S).js"
   local config_restored=false
+  
+  local css_file="$MAGICMIRROR_DIR/css/custom.css"
+  local css_backup="/tmp/magicmirror_custom_css_backup_$(date +%Y%m%d_%H%M%S).css"
+  local css_restored=false
   
   if [ -f "$config_file" ]; then
     log "Backing up config.js to $config_backup"
@@ -314,6 +342,26 @@ update_magicmirror_core() {
     fi
   else
     log "Warning: config.js not found at $config_file - skipping backup"
+  fi
+  
+  # Backup custom.css before update
+  if [ -f "$css_file" ]; then
+    log "Backing up custom.css to $css_backup"
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would backup $css_file to $css_backup"
+    else
+      cp -p "$css_file" "$css_backup" 2>&1 | tee -a "$LOG_FILE"
+      if [ $? -eq 0 ]; then
+        log "✓ custom.css backed up successfully"
+        # Also create a permanent backup in backup directory
+        mkdir -p "$BACKUP_DIR/css_backups" || true
+        cp -p "$css_file" "$BACKUP_DIR/css_backups/custom_$(date +%Y%m%d_%H%M%S).css" 2>&1 | tee -a "$LOG_FILE" || log "Warning: Could not create permanent css backup"
+      else
+        log "Warning: Could not backup custom.css"
+      fi
+    fi
+  else
+    log "Warning: custom.css not found at $css_file - skipping backup"
   fi
   
   pushd "$MAGICMIRROR_DIR" >/dev/null
@@ -445,6 +493,41 @@ update_magicmirror_core() {
     fi
   fi
   
+  # Restore custom.css after update if it was backed up
+  if [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
+    log "Restoring custom.css from backup"
+    if [ -f "$css_file" ]; then
+      # custom.css exists after update - check if it's different from backup
+      if ! diff -q "$css_file" "$css_backup" >/dev/null 2>&1; then
+        log "Warning: custom.css was modified during update - creating comparison backup"
+        cp -p "$css_file" "${css_file}.updated_$(date +%Y%m%d_%H%M%S)" 2>&1 | tee -a "$LOG_FILE" || true
+      fi
+    fi
+    
+    # Restore original custom.css
+    cp -p "$css_backup" "$css_file" 2>&1 | tee -a "$LOG_FILE"
+    if [ $? -eq 0 ]; then
+      log "✓ custom.css restored successfully"
+      css_restored=true
+      # Clean up temp backup after successful restore
+      rm -f "$css_backup" 2>&1 | tee -a "$LOG_FILE" || true
+    else
+      log "ERROR: Could not restore custom.css from $css_backup - please restore manually!"
+    fi
+  elif [ ! -f "$css_file" ] && [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
+    # custom.css missing after update but we have backup
+    log "Warning: custom.css missing after update - restoring from backup"
+    mkdir -p "$(dirname "$css_file")" || true
+    cp -p "$css_backup" "$css_file" 2>&1 | tee -a "$LOG_FILE"
+    if [ $? -eq 0 ]; then
+      log "✓ custom.css restored successfully"
+      css_restored=true
+      rm -f "$css_backup" 2>&1 | tee -a "$LOG_FILE" || true
+    else
+      log "ERROR: Could not restore custom.css - backup is at $css_backup"
+    fi
+  fi
+  
   popd >/dev/null
   log "=== MagicMirror Core Update Complete ==="
   
@@ -452,6 +535,11 @@ update_magicmirror_core() {
   if [ ! -f "$config_file" ]; then
     log "ERROR: config.js is missing after update! Check $BACKUP_DIR/config_backups/ for backups"
     return 2
+  fi
+  
+  # Note: custom.css is optional, so we don't fail if it's missing
+  if [ ! -f "$css_file" ] && [ "$css_restored" = true ]; then
+    log "WARNING: custom.css could not be restored! Check $BACKUP_DIR/css_backups/ for backups"
   fi
   
   return 0
@@ -532,6 +620,8 @@ for mod in "$MODULES_DIR"/*; do
   name=$(basename "$mod")
   log "--- Processing module: $name ---"
   
+  # Wrap module processing in a subshell to prevent individual module failures from stopping the script
+  (
   # Kill ffmpeg processes before updating RTSPStream
   kill_rtsp_ffmpeg_processes "$name"
 
@@ -949,6 +1039,7 @@ for mod in "$MODULES_DIR"/*; do
   fi
   
   log "--- Done: $name ---"
+  ) || log "ERROR: Module $name processing failed, but continuing with other modules..."
 done
 
 # Clean npm cache after all module updates to free up disk space
