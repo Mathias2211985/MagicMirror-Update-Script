@@ -6,6 +6,9 @@ This folder contains a script to automatically update MagicMirror modules (git +
 - ✓ **Garantierte Module-Updates**: Verbesserte git pull Logik erkennt verfügbare Updates zuverlässig
 - ✓ **Fallback-Mechanismus**: Wenn `git pull` versagt, wird automatisch `git reset --hard origin/branch` verwendet
 - ✓ **Update-Statistiken**: Zeigt am Ende Zusammenfassung (verarbeitet/aktualisiert/fehlgeschlagen)
+- ✓ **TMPDIR Fix**: Setzt TMPDIR automatisch für nvm-Kompatibilität
+- ✓ **Node.js v22 Standard**: Verwendet v22 LTS statt v24 für bessere ARM-Kompatibilität
+- ✓ **Architektur-Erkennung**: Erkennt automatisch armv7l/armhf und wählt kompatible Node.js Version
 - ✓ **Robustere Ausführung**: set -u statt pipefail (einzelne Fehler stoppen nicht das Skript)
 - ✓ **PATH für Cron-Jobs**: node/npm/git werden automatisch gefunden
 - ✓ **nvm-Unterstützung**: Automatisches Laden in Cron-Umgebung
@@ -20,12 +23,10 @@ This folder contains a script to automatically update MagicMirror modules (git +
 - ✓ Zusätzliche Dependency-Checks (url, fs, path)
 - ✓ Erweiterte ffmpeg-Diagnose (PATH, Berechtigungen)
 - ✓ Fallback npm install --force bei Problemen
-- ✓ Zwei neue Hilfsskripte: diagnose_rtspstream.sh und fix_rtspstream.sh
+- ✓ Automatische RTSPStream-Reparatur integriert im Hauptskript
 
 Files
 - update_modules.sh — main script. Configure the variables at the top before use.
-- fix_rtspstream.sh — repair script specifically for MMM-RTSPStream issues
-- diagnose_rtspstream.sh — diagnostic script to check RTSPStream installation status
 
 Usage
 1) Copy to the Raspberry Pi, for example into `/home/pi/scripts/` and make executable:
@@ -65,52 +66,6 @@ DRY_RUN=true ~/scripts/update_modules.sh
 ~/scripts/update_modules.sh
 ```
 
-RTSPStream Spezial-Skripte
-Das Repository enthält zwei zusätzliche Skripte speziell für MMM-RTSPStream Probleme:
-
-**Diagnose-Skript (diagnose_rtspstream.sh)**
-Überprüft den aktuellen Zustand der RTSPStream Installation und zeigt alle relevanten Informationen an.
-
-```bash
-# Kopiere Skript auf den Pi und mache es ausführbar
-chmod +x ~/scripts/diagnose_rtspstream.sh
-
-# Führe Diagnose aus
-~/scripts/diagnose_rtspstream.sh
-```
-
-Das Skript prüft:
-- Modul-Installation und Dateien
-- Node.js Dependencies
-- ffmpeg Installation und RTSP/H.264 Support
-- Laufende Prozesse (MagicMirror, ffmpeg)
-- Konfiguration in config.js
-- Netzwerk-Status (Port 9999)
-- System-Informationen
-- Letzte Log-Einträge
-
-**Reparatur-Skript (fix_rtspstream.sh)**
-Behebt automatisch die häufigsten RTSPStream-Probleme durch komplette Neuinstallation.
-
-```bash
-# Kopiere Skript auf den Pi und mache es ausführbar
-chmod +x ~/scripts/fix_rtspstream.sh
-
-# Führe Reparatur aus
-~/scripts/fix_rtspstream.sh
-```
-
-Das Skript führt folgende Schritte aus:
-1. Stoppt MagicMirror
-2. Beendet alle ffmpeg-Prozesse
-3. Prüft/installiert ffmpeg mit RTSP-Support
-4. Erstellt Backup der aktuellen Installation
-5. Löscht alte Installation (node_modules, package-lock.json)
-6. Bereinigt npm Cache
-7. Installiert RTSPStream komplett neu (mit Fallback-Strategien)
-8. Verifiziert Installation und Dependencies
-9. Startet MagicMirror neu
-
 Cron / Timer
 Das Skript kann automatisch per Cron-Job zweimal täglich ausgeführt werden. Nach erfolgreichen Updates startet der Pi automatisch neu.
 
@@ -145,15 +100,21 @@ Node.js Versions-Management
 
 **MagicMirror 2.34.0+ benötigt:**
 - Node.js >= 22.21.1 (nicht v23)
-- ODER Node.js >= 24.x (empfohlen)
+- ODER Node.js >= 24.x
 
 **Automatische Node.js Installation:**
 Das Skript nutzt **nvm (Node Version Manager)** für kompatible Installation auf allen Architekturen (inkl. armhf/32-bit):
 
 1. Prüft aktuelle Node.js Version
-2. Installiert nvm falls nicht vorhanden
-3. Installiert Node.js v24 LTS via nvm
-4. Setzt v24 als Standard-Version
+2. Erkennt Systemarchitektur (x86_64, aarch64, armv7l)
+3. Installiert nvm falls nicht vorhanden
+4. Installiert Node.js v22 LTS via nvm (stabiler als v24 auf ARM)
+5. Setzt v22 als Standard-Version
+
+**Warum v22 statt v24?**
+- Node.js v24 ist oft nicht für 32-bit ARM (armv7l/armhf) verfügbar
+- v22 LTS bietet bessere Kompatibilität und Stabilität
+- Erfüllt MagicMirror Mindestanforderungen (>=22.21.1)
 
 **Manuelle Installation (falls gewünscht):**
 ```bash
@@ -161,13 +122,13 @@ Das Skript nutzt **nvm (Node Version Manager)** für kompatible Installation auf
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
 source ~/.bashrc
 
-# Node.js v24 installieren
-nvm install 24
-nvm use 24
-nvm alias default 24
+# Node.js v22 installieren
+nvm install 22
+nvm use 22
+nvm alias default 22
 
 # Prüfen
-node --version  # sollte v24.x.x zeigen
+node --version  # sollte v22.x.x zeigen
 ```
 
 **Hinweis für 32-bit ARM (armhf):**
@@ -408,14 +369,6 @@ Troubleshooting
       sudo chown -R pi:pi .
       pm2 restart MagicMirror
       ```
-  - **Schnelle Lösung - Reparatur-Skripte verwenden**:
-    ```bash
-    # Diagnose durchführen (zeigt Status und mögliche Probleme)
-    ~/scripts/diagnose_rtspstream.sh
-    
-    # Automatische Reparatur (behebt häufigste Probleme)
-    ~/scripts/fix_rtspstream.sh
-    ```
   
   - **Häufige Probleme und Lösungen**:
     

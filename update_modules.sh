@@ -13,6 +13,9 @@ IFS=$'\n\t'
 # Set PATH for cron compatibility - ensures git, node, npm are found
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/bin:$PATH"
 
+# Set TMPDIR if not set (required by nvm and some npm operations)
+export TMPDIR="${TMPDIR:-/tmp}"
+
 # Load nvm if available (needed for cron jobs)
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
   export NVM_DIR="$HOME/.nvm"
@@ -91,23 +94,48 @@ check_and_update_nodejs() {
   if [ "$needs_update" = true ]; then
     log "Node.js update required for MagicMirror 2.34.0+"
     
+    # Detect architecture for appropriate Node.js version
+    arch=$(uname -m)
+    node_target_version="22"  # Default to v22 LTS (more compatible)
+    
+    # Node.js v24 might not be available for all architectures (especially armv7l/armhf)
+    if [ "$arch" = "x86_64" ] || [ "$arch" = "aarch64" ]; then
+      node_target_version="22"  # Use v22 for stability, v24 can have compatibility issues
+    else
+      log "Detected 32-bit ARM architecture ($arch) - using Node.js v22 LTS for best compatibility"
+      node_target_version="22"
+    fi
+    
     # Check if nvm is available
     if [ -s "$HOME/.nvm/nvm.sh" ]; then
-      log "nvm detected - using nvm to install Node.js v24 (LTS)"
+      log "nvm detected - using nvm to install Node.js v$node_target_version (LTS)"
       if [ "$DRY_RUN" = true ]; then
-        log "(dry) would run: nvm install 24 && nvm use 24 && nvm alias default 24"
+        log "(dry) would run: nvm install $node_target_version && nvm use $node_target_version && nvm alias default $node_target_version"
         return 0
       fi
       # shellcheck disable=SC1091
       source "$HOME/.nvm/nvm.sh"
-      nvm install 24 2>&1 | tee -a "$LOG_FILE"
-      nvm use 24 2>&1 | tee -a "$LOG_FILE"
-      nvm alias default 24 2>&1 | tee -a "$LOG_FILE"
-      log "✓ Node.js updated to $(node --version) via nvm"
+      
+      # Try to install the target version
+      if nvm install "$node_target_version" 2>&1 | tee -a "$LOG_FILE"; then
+        nvm use "$node_target_version" 2>&1 | tee -a "$LOG_FILE"
+        nvm alias default "$node_target_version" 2>&1 | tee -a "$LOG_FILE"
+        log "✓ Node.js updated to $(node --version) via nvm"
+      else
+        log "✗ Failed to install Node.js v$node_target_version - trying v22 as fallback"
+        if nvm install 22 2>&1 | tee -a "$LOG_FILE"; then
+          nvm use 22 2>&1 | tee -a "$LOG_FILE"
+          nvm alias default 22 2>&1 | tee -a "$LOG_FILE"
+          log "✓ Node.js updated to $(node --version) via nvm (fallback)"
+        else
+          log "✗ ERROR: Could not install Node.js - manual intervention required"
+          return 1
+        fi
+      fi
     else
       log "nvm not found - installing nvm first"
       if [ "$DRY_RUN" = true ]; then
-        log "(dry) would install nvm and Node.js v24"
+        log "(dry) would install nvm and Node.js v$node_target_version"
         return 0
       fi
       
@@ -122,17 +150,24 @@ check_and_update_nodejs() {
       
       if command -v nvm >/dev/null 2>&1; then
         log "✓ nvm installed successfully"
-        nvm install 24 2>&1 | tee -a "$LOG_FILE"
-        nvm use 24 2>&1 | tee -a "$LOG_FILE"
-        nvm alias default 24 2>&1 | tee -a "$LOG_FILE"
-        log "✓ Node.js updated to $(node --version)"
+        if nvm install "$node_target_version" 2>&1 | tee -a "$LOG_FILE"; then
+          nvm use "$node_target_version" 2>&1 | tee -a "$LOG_FILE"
+          nvm alias default "$node_target_version" 2>&1 | tee -a "$LOG_FILE"
+          log "✓ Node.js updated to $(node --version)"
+        else
+          log "✗ Failed to install Node.js v$node_target_version - trying v22 as fallback"
+          nvm install 22 2>&1 | tee -a "$LOG_FILE"
+          nvm use 22 2>&1 | tee -a "$LOG_FILE"
+          nvm alias default 22 2>&1 | tee -a "$LOG_FILE"
+          log "✓ Node.js updated to $(node --version) (fallback)"
+        fi
       else
         log "ERROR: nvm installation failed - please install manually:"
         log "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash"
         log "  source ~/.bashrc"
-        log "  nvm install 24"
-        log "  nvm use 24"
-        log "  nvm alias default 24"
+        log "  nvm install 22"
+        log "  nvm use 22"
+        log "  nvm alias default 22"
         return 1
       fi
     fi
