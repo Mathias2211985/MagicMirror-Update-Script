@@ -16,6 +16,29 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/
 # Set TMPDIR if not set (required by nvm and some npm operations)
 export TMPDIR="${TMPDIR:-/tmp}"
 
+# Lockfile to prevent parallel execution
+LOCKFILE="/tmp/update_modules.lock"
+if [ -f "$LOCKFILE" ]; then
+  lock_pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    echo "Another instance is already running (PID: $lock_pid). Exiting."
+    exit 1
+  else
+    echo "Removing stale lockfile"
+    rm -f "$LOCKFILE"
+  fi
+fi
+echo $$ > "$LOCKFILE"
+
+# Temporary file to track updates from subshells (created early)
+MODULE_UPDATE_TRACKER=$(mktemp)
+echo "0" > "$MODULE_UPDATE_TRACKER"
+
+# Cleanup function for lockfile and temp files
+cleanup_temp_files() {
+  rm -f "$LOCKFILE" "$MODULE_UPDATE_TRACKER" 2>/dev/null || true
+}
+
 # Load nvm if available (needed for cron jobs)
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
   export NVM_DIR="$HOME/.nvm"
@@ -24,6 +47,9 @@ if [ -s "$HOME/.nvm/nvm.sh" ]; then
 fi
 
 # --- Konfiguration (anpassen) ---
+# Diese Werte können auch in einer externen Konfigurationsdatei überschrieben werden:
+# $HOME/.config/magicmirror-update/config.sh oder /etc/magicmirror-update.conf
+
 MODULES_DIR="/home/pi/MagicMirror/modules"   # Pfad zum modules-Ordner (z. B. /home/pi/MagicMirror/modules)
 MAGICMIRROR_DIR="/home/pi/MagicMirror"       # Pfad zum MagicMirror-Hauptverzeichnis
 PM2_PROCESS_NAME="MagicMirror"               # Name des pm2 Prozesses (z. B. 'MagicMirror')
@@ -40,6 +66,37 @@ APT_UPDATE_MAX_ATTEMPTS=4                      # how many times to retry apt whe
 BACKUP_DIR="$HOME/module_backups"            # where to store module backups
 REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates were actually installed (more intelligent than AUTO_REBOOT_AFTER_SCRIPT)
 
+# --- E-Mail Benachrichtigungen ---
+EMAIL_ENABLED=false                          # true = E-Mail bei kritischen Fehlern senden
+EMAIL_RECIPIENT=""                           # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
+EMAIL_SUBJECT_PREFIX="[MagicMirror Update]"  # Betreff-Präfix für E-Mails
+EMAIL_ON_SUCCESS=false                       # true = auch bei erfolgreichen Updates E-Mail senden
+EMAIL_ON_ERROR=true                          # true = bei Fehlern E-Mail senden
+
+# --- Log-Rotation ---
+LOG_ROTATION_ENABLED=true                    # true = alte Logs automatisch rotieren
+LOG_MAX_SIZE_KB=5120                         # maximale Log-Größe in KB bevor rotiert wird (5MB)
+LOG_KEEP_COUNT=5                             # Anzahl der alten Logs die behalten werden
+
+# --- Healthcheck ---
+HEALTHCHECK_BEFORE_REBOOT=true              # true = MagicMirror testen bevor Reboot
+HEALTHCHECK_TIMEOUT=30                       # Sekunden warten auf MagicMirror-Start
+HEALTHCHECK_URL="http://localhost:8080"      # URL zum Testen ob MagicMirror läuft
+
+# --- Externe Konfigurationsdatei laden (überschreibt obige Werte) ---
+CONFIG_FILE_USER="$HOME/.config/magicmirror-update/config.sh"
+CONFIG_FILE_SYSTEM="/etc/magicmirror-update.conf"
+
+if [ -f "$CONFIG_FILE_USER" ]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE_USER"
+  echo "Loaded user config from $CONFIG_FILE_USER"
+elif [ -f "$CONFIG_FILE_SYSTEM" ]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE_SYSTEM"
+  echo "Loaded system config from $CONFIG_FILE_SYSTEM"
+fi
+
 # -- Spezialfälle: manche Module sollen mit anderem npm-Befehl aktualisiert werden.
 # Hier per Modulname anpassen. Beispiel: MMM-Webuntis braucht `npm ci --omit=dev`.
 # Ein einfacher case-Block wird pro Modul verwendet.
@@ -48,6 +105,137 @@ REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates wer
 
 timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
 log() { echo "$(timestamp) - $*" | tee -a "$LOG_FILE"; }
+
+# --- Log-Rotation Funktion ---
+rotate_logs() {
+  if [ "$LOG_ROTATION_ENABLED" != true ]; then
+    return 0
+  fi
+  
+  if [ ! -f "$LOG_FILE" ]; then
+    return 0
+  fi
+  
+  # Prüfe Log-Größe in KB
+  local log_size_kb
+  log_size_kb=$(du -k "$LOG_FILE" 2>/dev/null | cut -f1 || echo "0")
+  
+  if [ "$log_size_kb" -ge "$LOG_MAX_SIZE_KB" ]; then
+    echo "$(timestamp) - Log rotation triggered (size: ${log_size_kb}KB >= ${LOG_MAX_SIZE_KB}KB)"
+    
+    # Alte Logs verschieben
+    for i in $(seq $((LOG_KEEP_COUNT - 1)) -1 1); do
+      if [ -f "${LOG_FILE}.$i" ]; then
+        mv "${LOG_FILE}.$i" "${LOG_FILE}.$((i + 1))" 2>/dev/null || true
+      fi
+    done
+    
+    # Aktuelles Log archivieren
+    if [ -f "$LOG_FILE" ]; then
+      cp "$LOG_FILE" "${LOG_FILE}.1"
+      # Log-Datei leeren aber behalten
+      : > "$LOG_FILE"
+      echo "$(timestamp) - Log rotated (previous log: ${LOG_FILE}.1)" >> "$LOG_FILE"
+    fi
+    
+    # Überzählige Logs löschen
+    local count=$((LOG_KEEP_COUNT + 1))
+    while [ -f "${LOG_FILE}.$count" ]; do
+      rm -f "${LOG_FILE}.$count"
+      count=$((count + 1))
+    done
+    
+    # Auch komprimierte alte Logs aufräumen
+    find "$(dirname "$LOG_FILE")" -name "$(basename "$LOG_FILE").*" -type f 2>/dev/null | \
+      sort -t. -k2 -n -r | tail -n +$((LOG_KEEP_COUNT + 1)) | xargs -r rm -f 2>/dev/null || true
+  fi
+}
+
+# --- E-Mail Benachrichtigungs-Funktion ---
+send_email() {
+  local subject="$1"
+  local body="$2"
+  local priority="${3:-normal}"  # normal, error, success
+  
+  if [ "$EMAIL_ENABLED" != true ]; then
+    return 0
+  fi
+  
+  if [ -z "$EMAIL_RECIPIENT" ]; then
+    log "WARNING: EMAIL_ENABLED=true but EMAIL_RECIPIENT is empty"
+    return 1
+  fi
+  
+  # Skip success emails if not enabled
+  if [ "$priority" = "success" ] && [ "$EMAIL_ON_SUCCESS" != true ]; then
+    return 0
+  fi
+  
+  # Skip error emails if not enabled
+  if [ "$priority" = "error" ] && [ "$EMAIL_ON_ERROR" != true ]; then
+    return 0
+  fi
+  
+  local full_subject="$EMAIL_SUBJECT_PREFIX $subject"
+  local hostname
+  hostname=$(hostname 2>/dev/null || echo "unknown")
+  
+  # Zusätzliche Infos zum Body hinzufügen
+  local full_body="$body
+
+---
+Host: $hostname
+Zeit: $(timestamp)
+Log: $LOG_FILE"
+  
+  # Versuche verschiedene Mail-Tools
+  if command -v mail >/dev/null 2>&1; then
+    echo "$full_body" | mail -s "$full_subject" "$EMAIL_RECIPIENT" 2>/dev/null
+    log "E-Mail gesendet an $EMAIL_RECIPIENT (via mail)"
+    return 0
+  elif command -v sendmail >/dev/null 2>&1; then
+    {
+      echo "To: $EMAIL_RECIPIENT"
+      echo "Subject: $full_subject"
+      echo "Content-Type: text/plain; charset=utf-8"
+      echo ""
+      echo "$full_body"
+    } | sendmail -t 2>/dev/null
+    log "E-Mail gesendet an $EMAIL_RECIPIENT (via sendmail)"
+    return 0
+  elif command -v msmtp >/dev/null 2>&1; then
+    {
+      echo "To: $EMAIL_RECIPIENT"
+      echo "Subject: $full_subject"
+      echo ""
+      echo "$full_body"
+    } | msmtp "$EMAIL_RECIPIENT" 2>/dev/null
+    log "E-Mail gesendet an $EMAIL_RECIPIENT (via msmtp)"
+    return 0
+  elif command -v ssmtp >/dev/null 2>&1; then
+    {
+      echo "To: $EMAIL_RECIPIENT"
+      echo "Subject: $full_subject"
+      echo ""
+      echo "$full_body"
+    } | ssmtp "$EMAIL_RECIPIENT" 2>/dev/null
+    log "E-Mail gesendet an $EMAIL_RECIPIENT (via ssmtp)"
+    return 0
+  else
+    log "WARNING: Kein Mail-Tool gefunden (mail, sendmail, msmtp, ssmtp). E-Mail nicht gesendet."
+    return 1
+  fi
+}
+
+# Kritische Fehler-Funktion mit E-Mail
+log_error() {
+  local message="$*"
+  log "ERROR: $message"
+  send_email "Fehler beim Update" "$message" "error"
+}
+
+# Log-Rotation beim Start ausführen
+rotate_logs
 
 # detect if sudo is available; we'll prefer to call npm with sudo if present
 SUDO_CMD=""
@@ -70,10 +258,15 @@ check_and_update_nodejs() {
   log "Current Node.js version: v$current_node_version"
   
   # Check if version meets minimum requirements (>=22.21.1 or >=24)
-  # Extract major and minor version
-  node_major=$(echo "$current_node_version" | cut -d. -f1)
-  node_minor=$(echo "$current_node_version" | cut -d. -f2)
-  node_patch=$(echo "$current_node_version" | cut -d. -f3)
+  # Extract major and minor version with safe defaults
+  node_major=$(echo "$current_node_version" | cut -d. -f1 | grep -oE '[0-9]+' || echo "0")
+  node_minor=$(echo "$current_node_version" | cut -d. -f2 | grep -oE '[0-9]+' || echo "0")
+  node_patch=$(echo "$current_node_version" | cut -d. -f3 | grep -oE '[0-9]+' || echo "0")
+  
+  # Ensure variables are numeric
+  node_major=${node_major:-0}
+  node_minor=${node_minor:-0}
+  node_patch=${node_patch:-0}
   
   needs_update=false
   
@@ -280,10 +473,125 @@ apt_update_with_retry() {
   return 2
 }
 
+# --- Healthcheck Funktion ---
+# Prüft ob MagicMirror nach Updates korrekt startet
+perform_healthcheck() {
+  if [ "$HEALTHCHECK_BEFORE_REBOOT" != true ]; then
+    log "Healthcheck disabled (HEALTHCHECK_BEFORE_REBOOT != true)"
+    return 0
+  fi
+  
+  log "=== MagicMirror Healthcheck ==="
+  
+  # Prüfe ob pm2 verfügbar ist
+  if ! command -v pm2 >/dev/null 2>&1; then
+    log "WARNING: pm2 not found - skipping healthcheck"
+    return 0
+  fi
+  
+  # Prüfe ob curl oder wget verfügbar ist
+  local http_tool=""
+  if command -v curl >/dev/null 2>&1; then
+    http_tool="curl"
+  elif command -v wget >/dev/null 2>&1; then
+    http_tool="wget"
+  else
+    log "WARNING: Neither curl nor wget found - skipping HTTP healthcheck"
+  fi
+  
+  # Starte/Restarte MagicMirror für Healthcheck
+  log "Restarting $PM2_PROCESS_NAME for healthcheck..."
+  if pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE"; then
+    log "pm2 restart command sent"
+  else
+    log "WARNING: pm2 restart failed"
+    return 1
+  fi
+  
+  # Warte und prüfe Status
+  log "Waiting ${HEALTHCHECK_TIMEOUT}s for MagicMirror to start..."
+  local waited=0
+  local check_interval=5
+  local mm_running=false
+  
+  while [ $waited -lt "$HEALTHCHECK_TIMEOUT" ]; do
+    sleep $check_interval
+    waited=$((waited + check_interval))
+    
+    # Prüfe pm2 Status
+    local pm2_status
+    pm2_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
+    
+    if [ "$pm2_status" = "online" ]; then
+      log "✓ pm2 process is online (after ${waited}s)"
+      mm_running=true
+      break
+    elif [ "$pm2_status" = "errored" ] || [ "$pm2_status" = "stopped" ]; then
+      log "✗ pm2 process is $pm2_status after ${waited}s"
+      # Zeige Logs für Debugging
+      log "Last 20 lines of pm2 logs:"
+      pm2 logs "$PM2_PROCESS_NAME" --lines 20 --nostream 2>&1 | tee -a "$LOG_FILE" || true
+      return 1
+    fi
+    
+    log "Waiting... ($waited/${HEALTHCHECK_TIMEOUT}s) - status: $pm2_status"
+  done
+  
+  if [ "$mm_running" != true ]; then
+    log "✗ MagicMirror did not start within ${HEALTHCHECK_TIMEOUT}s"
+    log_error "MagicMirror Healthcheck fehlgeschlagen - Prozess startete nicht innerhalb von ${HEALTHCHECK_TIMEOUT}s"
+    return 1
+  fi
+  
+  # HTTP Healthcheck wenn möglich
+  if [ -n "$http_tool" ]; then
+    log "Performing HTTP healthcheck on $HEALTHCHECK_URL..."
+    sleep 5  # Kurz warten bis Server bereit
+    
+    local http_success=false
+    local http_attempts=0
+    local http_max_attempts=3
+    
+    while [ $http_attempts -lt $http_max_attempts ]; do
+      http_attempts=$((http_attempts + 1))
+      
+      if [ "$http_tool" = "curl" ]; then
+        if curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$HEALTHCHECK_URL" 2>/dev/null | grep -qE "^(200|302)$"; then
+          http_success=true
+          break
+        fi
+      else
+        if wget -q --spider --timeout=10 "$HEALTHCHECK_URL" 2>/dev/null; then
+          http_success=true
+          break
+        fi
+      fi
+      
+      log "HTTP check attempt $http_attempts failed, retrying..."
+      sleep 3
+    done
+    
+    if [ "$http_success" = true ]; then
+      log "✓ HTTP healthcheck passed - MagicMirror is responding"
+    else
+      log "✗ HTTP healthcheck failed - MagicMirror not responding on $HEALTHCHECK_URL"
+      log "  (This might be normal if MagicMirror is configured for local display only)"
+    fi
+  fi
+  
+  log "=== Healthcheck Complete ==="
+  send_email "Healthcheck erfolgreich" "MagicMirror läuft nach dem Update korrekt." "success"
+  return 0
+}
+
 # Final-exit handler: if requested, reboot the Pi after the script finishes.
 # This runs on EXIT (normal or due to error). We skip the reboot when DRY_RUN=true.
-on_exit_reboot() {
+on_exit_handler() {
   rc=$?
+  
+  # Always clean up temp files first
+  cleanup_temp_files
+  
   # Do not reboot in dry-run mode
   if [ "${DRY_RUN:-false}" = true ]; then
     log "DRY_RUN=true — skipping final reboot (exit code $rc)"
@@ -302,6 +610,12 @@ on_exit_reboot() {
   fi
   
   if [ "$should_reboot" = true ]; then
+    # Healthcheck vor dem Reboot durchführen
+    if ! perform_healthcheck; then
+      log "WARNING: Healthcheck failed - reboot will still proceed"
+      log_error "Healthcheck vor Reboot fehlgeschlagen! System wird trotzdem neu gestartet."
+    fi
+    
     log "Performing reboot now (script exit code $rc)"
     sudo_prefix=$(apt_get_prefix)
     # call reboot via sudo if necessary; ignore any failure to avoid masking original exit status
@@ -315,8 +629,8 @@ on_exit_reboot() {
   fi
 }
 
-# Install trap so on_exit_reboot runs when the script exits for any reason
-trap on_exit_reboot EXIT
+# Install trap so on_exit_handler runs when the script exits for any reason
+trap on_exit_handler EXIT
 
 if [ "$DRY_RUN" = true ]; then
   log "DRY RUN enabled — no changes will be made"
@@ -599,6 +913,19 @@ backup_modules() {
   log "Creating modules backup: $archive"
   if tar -czf "$archive" -C "$(dirname "$MODULES_DIR")" "$(basename "$MODULES_DIR")" 2>&1 | tee -a "$LOG_FILE"; then
     log "Backup created: $archive"
+    
+    # Clean up old backups - keep only the last 5
+    log "Cleaning up old backups (keeping last 5)..."
+    backup_count=$(find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f 2>/dev/null | wc -l)
+    if [ "$backup_count" -gt 5 ]; then
+      find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f -printf '%T+ %p\n' 2>/dev/null | \
+        sort | head -n -5 | cut -d' ' -f2- | while read -r old_backup; do
+        log "Removing old backup: $old_backup"
+        rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+      done
+      log "Old backups cleaned up"
+    fi
+    
     return 0
   else
     log "Backup FAILED for $MODULES_DIR"
@@ -788,7 +1115,7 @@ for mod in "$MODULES_DIR"/*; do
           if git_pull_with_retry; then
             updated_any=true
             module_git_updated=true
-            modules_updated=$((modules_updated+1))
+            echo "1" >> "$MODULE_UPDATE_TRACKER"
             log "✓ Module $name updated successfully (after discarding local changes)"
           else
             rc=$?
@@ -810,7 +1137,7 @@ for mod in "$MODULES_DIR"/*; do
         if git_pull_with_retry; then
           updated_any=true
           module_git_updated=true
-          modules_updated=$((modules_updated+1))
+          echo "1" >> "$MODULE_UPDATE_TRACKER"
           log "✓ Module $name updated successfully"
         else
           # if return code 1 -> up-to-date; 2 -> error/skip
@@ -1136,6 +1463,9 @@ for mod in "$MODULES_DIR"/*; do
   fi
 done
 
+# Read actual update count from tracker file
+modules_updated=$(grep -c "1" "$MODULE_UPDATE_TRACKER" 2>/dev/null || echo "0")
+
 log ""
 log "=== Module Update Summary ==="
 log "Total modules processed: $modules_processed"
@@ -1146,6 +1476,18 @@ log "Overall success: $(( modules_processed - modules_failed )) / $modules_proce
 
 if [ $modules_failed -gt 0 ]; then
   log "WARNING: $modules_failed module(s) had errors - check log for details"
+  log_error "$modules_failed Modul(e) hatten Fehler beim Update. Verarbeitet: $modules_processed, Erfolgreich: $(( modules_processed - modules_failed ))"
+fi
+
+# Sende Erfolgs-E-Mail wenn alles gut lief
+if [ $modules_failed -eq 0 ] && [ "$modules_updated" -gt 0 ]; then
+  send_email "Updates erfolgreich" "MagicMirror Module wurden aktualisiert.
+
+Zusammenfassung:
+- Module verarbeitet: $modules_processed
+- Module aktualisiert: $modules_updated
+- Fehler: $modules_failed
+- Übersprungen: $modules_skipped" "success"
 fi
 
 # Clean npm cache after all module updates to free up disk space

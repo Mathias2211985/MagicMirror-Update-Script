@@ -2,6 +2,14 @@ Update Modules Script for Raspberry Pi
 
 This folder contains a script to automatically update MagicMirror modules (git + npm) and optionally restart the pm2 process.
 
+**🆕 Neue Features (Januar 2026)**
+- ✓ **E-Mail-Benachrichtigungen**: Optional bei Fehlern oder erfolgreichen Updates
+- ✓ **Log-Rotation**: Automatische Rotation wenn Log zu groß wird (Standard: 5MB)
+- ✓ **Externe Konfiguration**: Config-Datei statt Skript editieren
+- ✓ **Healthcheck vor Reboot**: Prüft ob MagicMirror läuft bevor Neustart
+- ✓ **Lockfile**: Verhindert parallele Ausführungen
+- ✓ **Backup-Cleanup**: Alte Backups werden automatisch gelöscht (behält 5)
+
 **🆕 Cron-Optimierungen & Update-Zuverlässigkeit (Januar 2026)**
 - ✓ **Garantierte Module-Updates**: Verbesserte git pull Logik erkennt verfügbare Updates zuverlässig
 - ✓ **Fallback-Mechanismus**: Wenn `git pull` versagt, wird automatisch `git reset --hard origin/branch` verwendet
@@ -26,20 +34,32 @@ This folder contains a script to automatically update MagicMirror modules (git +
 - ✓ Automatische RTSPStream-Reparatur integriert im Hauptskript
 
 Files
-- update_modules.sh — main script. Configure the variables at the top before use.
+- `update_modules.sh` — Hauptskript. Konfiguration anpassen vor Verwendung.
+- `config.example.sh` — Beispiel-Konfigurationsdatei (kopieren und anpassen).
 
-Usage
-1) Copy to the Raspberry Pi, for example into `/home/pi/scripts/` and make executable:
+Installation
+1) Kopiere auf den Raspberry Pi, z.B. nach `/home/pi/scripts/`:
 
 ```bash
-# on the Pi
+# auf dem Pi
 mkdir -p ~/scripts
-scp update_modules.sh pi@raspberrypi:/home/pi/scripts/
+scp update_modules.sh config.example.sh pi@raspberrypi:/home/pi/scripts/
 ssh pi@raspberrypi
 chmod +x ~/scripts/update_modules.sh
 ```
 
-2) Edit configuration at the top of `update_modules.sh`:
+2) **Option A**: Externe Konfigurationsdatei verwenden (empfohlen):
+
+```bash
+# Konfigurationsverzeichnis erstellen
+mkdir -p ~/.config/magicmirror-update
+
+# Beispielkonfiguration kopieren und anpassen
+cp ~/scripts/config.example.sh ~/.config/magicmirror-update/config.sh
+nano ~/.config/magicmirror-update/config.sh
+```
+
+2) **Option B**: Variablen direkt im Skript anpassen:
 - `MAGICMIRROR_DIR` — Pfad zum MagicMirror-Hauptverzeichnis (z. B. `/home/pi/MagicMirror`).
 - `MODULES_DIR` — Pfad zu deinem MagicMirror `modules` Ordner (z. B. `/home/pi/MagicMirror/modules`).
 - `UPDATE_MAGICMIRROR_CORE` — `true` (Standard) aktualisiert MagicMirror Core vor den Modulen via `git pull && node --run install-mm`.
@@ -66,6 +86,58 @@ DRY_RUN=true ~/scripts/update_modules.sh
 ~/scripts/update_modules.sh
 ```
 
+E-Mail-Benachrichtigungen einrichten
+------------------------------------
+Das Skript kann E-Mails bei Fehlern oder erfolgreichen Updates senden.
+
+**Voraussetzung**: Ein Mail-Tool muss installiert und konfiguriert sein:
+- `msmtp` (empfohlen für Gmail/SMTP)
+- `ssmtp`
+- `mail` (mailutils)
+- `sendmail`
+
+**Beispiel msmtp-Konfiguration** (`~/.msmtprc`):
+```
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        ~/.msmtp.log
+
+account        gmail
+host           smtp.gmail.com
+port           587
+from           deine-email@gmail.com
+user           deine-email@gmail.com
+password       dein-app-passwort
+
+account default : gmail
+```
+
+**E-Mail in Config aktivieren**:
+```bash
+EMAIL_ENABLED=true
+EMAIL_RECIPIENT="deine-email@example.com"
+EMAIL_ON_ERROR=true      # Bei Fehlern benachrichtigen
+EMAIL_ON_SUCCESS=false   # Bei Erfolg benachrichtigen (optional)
+```
+
+Healthcheck
+-----------
+Vor einem Reboot kann das Skript prüfen, ob MagicMirror korrekt startet:
+
+```bash
+HEALTHCHECK_BEFORE_REBOOT=true
+HEALTHCHECK_TIMEOUT=30
+HEALTHCHECK_URL="http://localhost:8080"
+```
+
+Das Skript:
+1. Startet MagicMirror via pm2 neu
+2. Wartet bis zu 30 Sekunden auf den Start
+3. Prüft optional ob die Web-Oberfläche erreichbar ist
+4. Sendet E-Mail bei Problemen (wenn aktiviert)
+
 Cron / Timer
 Das Skript kann automatisch per Cron-Job zweimal täglich ausgeführt werden. Nach erfolgreichen Updates startet der Pi automatisch neu.
 
@@ -78,6 +150,7 @@ Das Skript ist jetzt speziell für zuverlässige Cron-Ausführung optimiert:
 - **Intelligenter Reboot**: System startet nur neu wenn Updates installiert wurden
 - **Fehler-Logging**: Alle Fehler werden geloggt, Skript macht trotzdem weiter
 - **Modul-Isolation**: Jedes Modul läuft in eigener Subshell
+- **Lockfile**: Verhindert dass Skript mehrfach gleichzeitig läuft
 
 Beispiel crontab (editiere mit `crontab -e`):
 ```bash
@@ -90,6 +163,7 @@ Beispiel crontab (editiere mit `crontab -e`):
 - Das Skript führt bei Updates automatisch einen **kompletten System-Neustart** durch
 - **Kein Neustart** wenn keine Updates gefunden wurden (`REBOOT_ONLY_ON_UPDATES=true`)
 - Alle Ausgaben werden nach `~/update_modules.log` geschrieben
+- **Log-Rotation** verhindert dass die Log-Datei zu groß wird (Standard: 5MB, behält 5 alte Logs)
 - Bei Problemen: Log prüfen mit `cat ~/update_modules.log`
 
 Alternativ: systemd-timer (wenn bevorzugt) — ich kann das für dich erstellen, wenn du möchtest.
