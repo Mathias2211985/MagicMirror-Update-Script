@@ -67,8 +67,8 @@ BACKUP_DIR="$HOME/module_backups"            # where to store module backups
 REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates were actually installed (more intelligent than AUTO_REBOOT_AFTER_SCRIPT)
 
 # --- E-Mail Benachrichtigungen ---
-EMAIL_ENABLED=true                          # true = E-Mail bei kritischen Fehlern senden
-EMAIL_RECIPIENT="mathiasbusch@live.de"      # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
+EMAIL_ENABLED=false                          # true = E-Mail bei kritischen Fehlern senden
+EMAIL_RECIPIENT=""                           # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
 EMAIL_SUBJECT_PREFIX="[MagicMirror Update]"  # Betreff-Präfix für E-Mails
 EMAIL_ON_SUCCESS=false                       # true = auch bei erfolgreichen Updates E-Mail senden
 EMAIL_ON_ERROR=true                          # true = bei Fehlern E-Mail senden
