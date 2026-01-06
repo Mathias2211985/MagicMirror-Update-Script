@@ -615,13 +615,34 @@ kill_rtsp_ffmpeg_processes() {
   fi
 }
 
+# Track module processing statistics
+modules_processed=0
+modules_updated=0
+modules_failed=0
+modules_skipped=0
+
+log "=== Starting module updates ==="
+log "Scanning directory: $MODULES_DIR"
+
 for mod in "$MODULES_DIR"/*; do
   [ -d "$mod" ] || continue
   name=$(basename "$mod")
-  log "--- Processing module: $name ---"
+  
+  # Skip default modules directory
+  if [ "$name" = "default" ]; then
+    log "Skipping default modules directory"
+    modules_skipped=$((modules_skipped+1))
+    continue
+  fi
+  
+  modules_processed=$((modules_processed+1))
+  log ""
+  log "=== [$modules_processed] Processing module: $name ==="
   
   # Wrap module processing in a subshell to prevent individual module failures from stopping the script
+  # Set -e temporarily disabled in subshell so git/npm failures don't abort
   (
+  set +e  # Don't exit on error within this subshell
   # Kill ffmpeg processes before updating RTSPStream
   kill_rtsp_ffmpeg_processes "$name"
 
@@ -635,8 +656,10 @@ for mod in "$MODULES_DIR"/*; do
       local max_attempts=6
       local attempt=1
       local sleep_for=2
-      local old_head new_head
+      local old_head new_head current_branch
       old_head=$(git rev-parse --verify HEAD 2>/dev/null || echo "none")
+      current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+      
       while [ $attempt -le $max_attempts ]; do
         log "Attempt $attempt: git fetch --all --prune"
         if ! git fetch --all --prune 2>&1 | tee -a "$LOG_FILE"; then
@@ -653,13 +676,39 @@ for mod in "$MODULES_DIR"/*; do
           fi
         fi
 
+        # Check if there are updates available after fetch
+        local commits_behind=0
+        if git rev-parse --verify origin/$current_branch >/dev/null 2>&1; then
+          commits_behind=$(git rev-list --count HEAD..origin/$current_branch 2>/dev/null || echo "0")
+          log "Commits behind origin/$current_branch: $commits_behind"
+          
+          if [ "$commits_behind" -gt 0 ]; then
+            log "Updates available - showing incoming commits:"
+            git log --oneline --graph -n 5 HEAD..origin/$current_branch 2>&1 | tee -a "$LOG_FILE" || true
+          fi
+        else
+          log "Warning: origin/$current_branch not found, will try pull anyway"
+        fi
+
         log "Running: git pull --ff-only"
         if git pull --ff-only 2>&1 | tee -a "$LOG_FILE"; then
           new_head=$(git rev-parse --verify HEAD 2>/dev/null || echo "none")
           if [ "$old_head" != "$new_head" ]; then
-            log "git pull updated HEAD for $name ($old_head -> $new_head)"
+            log "✓ git pull updated HEAD for $name ($old_head -> $new_head)"
             return 0
           else
+            # Double-check: even if pull says up-to-date, verify against remote
+            if [ "$commits_behind" -gt 0 ]; then
+              log "WARNING: git pull reported up-to-date but $commits_behind commits are available on remote!"
+              log "Trying alternative update method: git reset --hard origin/$current_branch"
+              if git reset --hard origin/$current_branch 2>&1 | tee -a "$LOG_FILE"; then
+                new_head=$(git rev-parse --verify HEAD 2>/dev/null || echo "none")
+                if [ "$old_head" != "$new_head" ]; then
+                  log "✓ Alternative update successful ($old_head -> $new_head)"
+                  return 0
+                fi
+              fi
+            fi
             log "git pull: already up-to-date for $name"
             return 1
           fi
@@ -704,12 +753,14 @@ for mod in "$MODULES_DIR"/*; do
           if git_pull_with_retry; then
             updated_any=true
             module_git_updated=true
+            modules_updated=$((modules_updated+1))
+            log "✓ Module $name updated successfully (after discarding local changes)"
           else
             rc=$?
             if [ $rc -eq 1 ]; then
-              :
+              log "✓ Module $name already up-to-date (after discarding local changes)"
             else
-              log "Warning: git update failed for $name after discarding local changes (see logs)"
+              log "✗ Warning: git update failed for $name after discarding local changes (see logs)"
             fi
           fi
         fi
@@ -724,13 +775,15 @@ for mod in "$MODULES_DIR"/*; do
         if git_pull_with_retry; then
           updated_any=true
           module_git_updated=true
+          modules_updated=$((modules_updated+1))
+          log "✓ Module $name updated successfully"
         else
           # if return code 1 -> up-to-date; 2 -> error/skip
           rc=$?
           if [ $rc -eq 1 ]; then
-            : # up-to-date
+            log "✓ Module $name already up-to-date"
           else
-            log "Warning: git update failed for $name (see logs)"
+            log "✗ Warning: git update failed for $name (see logs)"
           fi
         fi
       fi
@@ -1038,11 +1091,30 @@ for mod in "$MODULES_DIR"/*; do
     fi
   fi
   
-  log "--- Done: $name ---"
-  ) || log "ERROR: Module $name processing failed, but continuing with other modules..."
+  log "✓ Done: $name"
+  exit 0  # Explicit success exit from subshell
+  ) 
+  subshell_rc=$?
+  if [ $subshell_rc -ne 0 ]; then
+    log "✗ ERROR: Module $name processing failed (exit code $subshell_rc), but continuing with other modules..."
+    modules_failed=$((modules_failed+1))
+  fi
 done
 
+log ""
+log "=== Module Update Summary ==="
+log "Total modules processed: $modules_processed"
+log "Modules updated: $modules_updated"
+log "Modules failed: $modules_failed"
+log "Modules skipped: $modules_skipped"
+log "Overall success: $(( modules_processed - modules_failed )) / $modules_processed"
+
+if [ $modules_failed -gt 0 ]; then
+  log "WARNING: $modules_failed module(s) had errors - check log for details"
+fi
+
 # Clean npm cache after all module updates to free up disk space
+log ""
 log "Cleaning npm cache after module updates..."
 if [ "$DRY_RUN" = true ]; then
   log "(dry) would run: npm cache clean --force"

@@ -2,13 +2,16 @@ Update Modules Script for Raspberry Pi
 
 This folder contains a script to automatically update MagicMirror modules (git + npm) and optionally restart the pm2 process.
 
-**🆕 Cron-Optimierungen (Januar 2026)**
-- ✓ Robustere Ausführung: set -u statt pipefail (einzelne Fehler stoppen nicht das Skript)
-- ✓ PATH für Cron-Jobs: node/npm/git werden automatisch gefunden
-- ✓ nvm-Unterstützung: Automatisches Laden in Cron-Umgebung
-- ✓ Intelligenter Reboot: Nur wenn Updates installiert wurden (nicht bei jedem Lauf)
-- ✓ Besseres Fehler-Handling: Modul-Fehler werden geloggt, Skript läuft weiter
-- ✓ Subshell-Isolation: Jedes Modul läuft isoliert vom Hauptskript
+**🆕 Cron-Optimierungen & Update-Zuverlässigkeit (Januar 2026)**
+- ✓ **Garantierte Module-Updates**: Verbesserte git pull Logik erkennt verfügbare Updates zuverlässig
+- ✓ **Fallback-Mechanismus**: Wenn `git pull` versagt, wird automatisch `git reset --hard origin/branch` verwendet
+- ✓ **Update-Statistiken**: Zeigt am Ende Zusammenfassung (verarbeitet/aktualisiert/fehlgeschlagen)
+- ✓ **Robustere Ausführung**: set -u statt pipefail (einzelne Fehler stoppen nicht das Skript)
+- ✓ **PATH für Cron-Jobs**: node/npm/git werden automatisch gefunden
+- ✓ **nvm-Unterstützung**: Automatisches Laden in Cron-Umgebung
+- ✓ **Intelligenter Reboot**: Nur wenn Updates installiert wurden (nicht bei jedem Lauf)
+- ✓ **Besseres Fehler-Handling**: Modul-Fehler werden geloggt, Skript läuft weiter
+- ✓ **Subshell-Isolation**: Jedes Modul läuft isoliert vom Hauptskript (set +e)
 
 **🆕 Verbesserte RTSPStream-Unterstützung (Dezember 2024)**
 - ✓ Erweiterte ffmpeg-Prozess-Erkennung (mehrere Muster)
@@ -222,6 +225,13 @@ Das Skript behebt diesen Fehler automatisch durch:
 Universelle Modul-Update-Strategie
 Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manuelle Konfiguration:
 
+- **Intelligente Git-Update-Erkennung (Neu 01/2026)**:
+  - **Zählt verfügbare Commits** nach `git fetch` (z.B. "Commits behind origin/main: 1")
+  - **Zeigt neue Commits** bevor Update durchgeführt wird
+  - **Fallback bei git pull Problemen**: Wenn `git pull --ff-only` keine Updates durchführt obwohl welche verfügbar sind, verwendet das Skript automatisch `git reset --hard origin/branch`
+  - **Branch-Erkennung**: Funktioniert automatisch mit `main`, `master` oder jedem anderen Branch
+  - **Detailliertes Logging**: Zeigt alte und neue Commit-Hashes bei erfolgreichen Updates
+
 - **Intelligente npm-Strategie**:
   - Nach Git-Updates mit `package-lock.json` → automatisch `npm ci` für saubere, deterministische Installation
   - Ohne Git-Update oder ohne Lockfile → `npm install` für maximale Flexibilität
@@ -229,6 +239,21 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
     1. `npm ci` (wenn Lockfile vorhanden)
     2. `npm install` (Standard-Fallback)
     3. `npm install --only=production` (letzter Ausweg für Kompatibilität)
+
+- **Update-Statistiken am Ende**:
+  ```
+  === Module Update Summary ===
+  Total modules processed: 15
+  Modules updated: 3
+  Modules failed: 0
+  Modules skipped: 1 (default)
+  Overall success: 15 / 15
+  ```
+
+- **Visuelle Status-Indikatoren**:
+  - ✓ Erfolgreiche Updates und Operationen
+  - ✗ Fehler und Warnungen
+  - Nummerierte Module: `[5] Processing module: MMM-CalendarExt3`
 
 - **Automatische Fehlerbehandlung**: Bei unbekannten npm-Befehlen (alte npm-Versionen) probiert das Skript automatisch kompatible Alternativen
 - **Git-Update Handling**: Bei `git fetch`/`git pull` Fehlern ("another git process" oder `index.lock`) wartet das Skript automatisch und versucht mehrmals erneut (exponentielles Backoff)
@@ -302,13 +327,15 @@ DRY_RUN=true ~/scripts/update_modules.sh
 
 Hinweise und Edge-Cases
 - **Lokale Änderungen**: Bei `AUTO_DISCARD_LOCAL=true` (Standard) werden lokale Änderungen automatisch verworfen (`git reset --hard` + `git clean -fdx`). Sonst werden Repositories mit lokalen Änderungen übersprungen.
-- **Git Pull**: Das Skript verwendet `git pull --ff-only`, um automatische Merge-Commits zu vermeiden.
+- **Git Pull**: Das Skript verwendet `git pull --ff-only` mit automatischem Fallback zu `git reset --hard origin/branch` falls Updates verfügbar sind aber pull versagt.
+- **Update-Erkennung**: Nach `git fetch` wird die Anzahl verfügbarer Commits geprüft - funktioniert zuverlässig mit allen Branches (main/master/etc.).
 - **npm**: Universelle Strategie für alle Module - automatische Wahl zwischen `npm ci` und `npm install` basierend auf Git-Update-Status und Lockfile-Vorhandensein.
 - **npm Fallbacks**: Bei Fehlern probiert das Skript automatisch alternative npm-Befehle (ci → install → install --only=production) für maximale Kompatibilität.
 - **pm2**: Das Skript prüft und konfiguriert pm2-Autostart, bereinigt fehlerhafte Prozesse und stellt sicher, dass der systemd-Service aktiviert ist.
 - **npm Warnungen**: Deprecation-Warnungen bei älteren Modulen (z.B. rimraf, eslint) sind normal und unkritisch für lokale MagicMirror-Installation.
 - **Security Vulnerabilities**: Low/High Vulnerabilities in Dev-Dependencies (jsdoc, eslint) sind für lokal laufende Module unkritisch und können ignoriert werden.
 - **Neue Module**: Funktionieren automatisch ohne Konfiguration - die universelle Strategie passt sich an jedes Modul an.
+- **default-Verzeichnis**: Wird automatisch übersprungen (enthält eingebaute MagicMirror-Module).
 
 pm2 Autostart Setup
 Das Skript konfiguriert automatisch pm2 für Autostart beim Systemboot:
@@ -337,7 +364,22 @@ pm2 list
 ```
 
 Troubleshooting
-- **Module funktionieren nach Update nicht**: 
+
+**Module Updates werden nicht erkannt (z.B. CalendarExt3)**
+- **Problem**: `git pull: already up-to-date` wird gemeldet, obwohl Updates verfügbar sind
+- **Ursache**: In seltenen Fällen kann `git pull --ff-only` keine Updates durchführen
+- **Lösung (automatisch seit 01/2026)**: 
+  - Das Skript zählt verfügbare Commits nach `git fetch`
+  - Wenn Commits verfügbar sind aber pull versagt, wird automatisch `git reset --hard origin/branch` verwendet
+  - Im Log erscheint: "WARNING: git pull reported up-to-date but X commits are available on remote!"
+- **Manuelle Prüfung**:
+  ```bash
+  cd /home/pi/MagicMirror/modules/MMM-CalendarExt3
+  git fetch origin
+  git log --oneline HEAD..origin/main  # zeigt verfügbare Updates
+  ```
+
+**Module funktionieren nach Update nicht** 
   - Das Skript versucht automatisch 3 Fallback-Strategien
   - Manuelle Reparatur: `rm -rf node_modules package-lock.json && npm install` im Modul-Ordner
   - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde
