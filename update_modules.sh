@@ -476,28 +476,54 @@ apt_update_with_retry() {
 # --- Healthcheck Funktion ---
 # Prüft ob MagicMirror nach Updates korrekt startet
 perform_healthcheck() {
-  if [ "$HEALTHCHECK_BEFORE_REBOOT" != true ]; then
-    log "Healthcheck disabled (HEALTHCHECK_BEFORE_REBOOT != true)"
-    return 0
-  fi
-  
   log "=== MagicMirror Healthcheck ==="
-  
-  # Prüfe ob pm2 verfügbar ist
+  # 1. Prüfe pm2-Prozessstatus
   if ! command -v pm2 >/dev/null 2>&1; then
-    log "WARNING: pm2 not found - skipping healthcheck"
-    return 0
+    log "WARNING: pm2 nicht gefunden — Healthcheck abgebrochen"
+    return 1
   fi
-  
-  # Prüfe ob curl oder wget verfügbar ist
-  local http_tool=""
-  if command -v curl >/dev/null 2>&1; then
-    http_tool="curl"
-  elif command -v wget >/dev/null 2>&1; then
-    http_tool="wget"
+
+  status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
+  if [ "$status" != "online" ]; then
+    log "✗ pm2: $PM2_PROCESS_NAME ist NICHT online! Status: $status"
+    send_email "FEHLER MagicMirror Status" "Der pm2-Service '$PM2_PROCESS_NAME' ist nicht online, sondern $status."
+    return 1
   else
-    log "WARNING: Neither curl nor wget found - skipping HTTP healthcheck"
+    log "✓ pm2-Prozess '$PM2_PROCESS_NAME' ist online"
   fi
+
+  # 2. HTTP-Check
+  if command -v curl >/dev/null 2>&1; then
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTHCHECK_URL")
+    if [[ "$http_code" =~ ^(200|302|403)$ ]]; then
+      log "✓ HTTP-Check erfolgreich ($HEALTHCHECK_URL liefert $http_code)"
+    else
+      log "✗ HTTP-Check fehlgeschlagen! $HEALTHCHECK_URL antwortet mit $http_code"
+      send_email "FEHLER: HTTP Healthcheck" \
+        "Der MagicMirror ist via HTTP ($HEALTHCHECK_URL) nicht erreichbar oder meldet Fehler ($http_code)."
+      return 1
+    fi
+  else
+    log "WARNING: curl nicht gefunden — HTTP-Check wird übersprungen."
+  fi
+
+  # 3. PM2-Logs auf kritische Fehler scannen
+  local ERRPATTERN="Error|FATAL|Cannot find module|Uncaught|ReferenceError|Exception"
+  local PM2_ERRORS
+  PM2_ERRORS=$(pm2 logs "$PM2_PROCESS_NAME" --lines 50 --nostream 2>&1 | grep -E "$ERRPATTERN" | tail -n 5)
+  if [ -n "$PM2_ERRORS" ]; then
+    log "✗ Kritische Fehler in den letzten 50 Zeilen von pm2 logs:"
+    echo "$PM2_ERRORS" | while read -r l; do log "    $l"; done
+    send_email "Fehler im MagicMirror Log" "$PM2_ERRORS"
+    return 1
+  else
+    log "✓ Keine kritischen Fehler im pm2 Log erkannt"
+  fi
+
+  log "=== Healthcheck erfolgreich ==="
+  return 0
+}
   
   # Starte/Restarte MagicMirror für Healthcheck
   log "Restarting $PM2_PROCESS_NAME for healthcheck..."
