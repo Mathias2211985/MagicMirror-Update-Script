@@ -61,16 +61,16 @@ LOG_FILE="$HOME/update_modules.log"
 RUN_RASPBIAN_UPDATE=true                      # true = run apt-get full-upgrade on the Raspberry Pi after module updates (requires sudo or root)
 MAKE_MODULE_BACKUP=true                       # true = create a tar.gz backup of the modules directory before apt upgrade
 AUTO_REBOOT_AFTER_UPGRADE=true               # true = reboot automatically after apt full-upgrade if required
-AUTO_REBOOT_AFTER_SCRIPT=false               # true = reboot the Pi after EVERY script run. false = only reboot when updates were installed. DRY_RUN overrides this.
+AUTO_REBOOT_AFTER_SCRIPT=true               # true = reboot the Pi after EVERY script run. false = only reboot when updates were installed. DRY_RUN overrides this.
 APT_UPDATE_MAX_ATTEMPTS=4                      # how many times to retry apt when dpkg/apt lock is present
 BACKUP_DIR="$HOME/module_backups"            # where to store module backups
 REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates were actually installed (more intelligent than AUTO_REBOOT_AFTER_SCRIPT)
 
 # --- E-Mail Benachrichtigungen ---
-EMAIL_ENABLED=false                          # true = E-Mail bei kritischen Fehlern senden
-EMAIL_RECIPIENT=""                           # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
+EMAIL_ENABLED=true                          # true = E-Mail bei kritischen Fehlern senden
+EMAIL_RECIPIENT="mathiasbusch@live.de"      # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
 EMAIL_SUBJECT_PREFIX="[MagicMirror Update]"  # Betreff-Präfix für E-Mails
-EMAIL_ON_SUCCESS=false                       # true = auch bei erfolgreichen Updates E-Mail senden
+EMAIL_ON_SUCCESS=true                       # true = auch bei erfolgreichen Updates E-Mail senden
 EMAIL_ON_ERROR=true                          # true = bei Fehlern E-Mail senden
 
 # --- Log-Rotation ---
@@ -477,53 +477,6 @@ apt_update_with_retry() {
 # Prüft ob MagicMirror nach Updates korrekt startet
 perform_healthcheck() {
   log "=== MagicMirror Healthcheck ==="
-  # 1. Prüfe pm2-Prozessstatus
-  if ! command -v pm2 >/dev/null 2>&1; then
-    log "WARNING: pm2 nicht gefunden — Healthcheck abgebrochen"
-    return 1
-  fi
-
-  status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
-  if [ "$status" != "online" ]; then
-    log "✗ pm2: $PM2_PROCESS_NAME ist NICHT online! Status: $status"
-    send_email "FEHLER MagicMirror Status" "Der pm2-Service '$PM2_PROCESS_NAME' ist nicht online, sondern $status."
-    return 1
-  else
-    log "✓ pm2-Prozess '$PM2_PROCESS_NAME' ist online"
-  fi
-
-  # 2. HTTP-Check
-  if command -v curl >/dev/null 2>&1; then
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTHCHECK_URL")
-    if [[ "$http_code" =~ ^(200|302|403)$ ]]; then
-      log "✓ HTTP-Check erfolgreich ($HEALTHCHECK_URL liefert $http_code)"
-    else
-      log "✗ HTTP-Check fehlgeschlagen! $HEALTHCHECK_URL antwortet mit $http_code"
-      send_email "FEHLER: HTTP Healthcheck" \
-        "Der MagicMirror ist via HTTP ($HEALTHCHECK_URL) nicht erreichbar oder meldet Fehler ($http_code)."
-      return 1
-    fi
-  else
-    log "WARNING: curl nicht gefunden — HTTP-Check wird übersprungen."
-  fi
-
-  # 3. PM2-Logs auf kritische Fehler scannen
-  local ERRPATTERN="Error|FATAL|Cannot find module|Uncaught|ReferenceError|Exception"
-  local PM2_ERRORS
-  PM2_ERRORS=$(pm2 logs "$PM2_PROCESS_NAME" --lines 50 --nostream 2>&1 | grep -E "$ERRPATTERN" | tail -n 5)
-  if [ -n "$PM2_ERRORS" ]; then
-    log "✗ Kritische Fehler in den letzten 50 Zeilen von pm2 logs:"
-    echo "$PM2_ERRORS" | while read -r l; do log "    $l"; done
-    send_email "Fehler im MagicMirror Log" "$PM2_ERRORS"
-    return 1
-  else
-    log "✓ Keine kritischen Fehler im pm2 Log erkannt"
-  fi
-
-  log "=== Healthcheck erfolgreich ==="
-  return 0
-}
   
   # Starte/Restarte MagicMirror für Healthcheck
   log "Restarting $PM2_PROCESS_NAME for healthcheck..."
@@ -533,21 +486,21 @@ perform_healthcheck() {
     log "WARNING: pm2 restart failed"
     return 1
   fi
-  
+
   # Warte und prüfe Status
   log "Waiting ${HEALTHCHECK_TIMEOUT}s for MagicMirror to start..."
-  local waited=0
-  local check_interval=5
-  local mm_running=false
-  
+  local waited check_interval mm_running pm2_status http_success http_attempts http_max_attempts http_tool
+  http_tool=""
+  waited=0
+  check_interval=5
+  mm_running=false
+
   while [ $waited -lt "$HEALTHCHECK_TIMEOUT" ]; do
     sleep $check_interval
     waited=$((waited + check_interval))
-    
-    # Prüfe pm2 Status
-    local pm2_status
+
     pm2_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
-    
+
     if [ "$pm2_status" = "online" ]; then
       log "✓ pm2 process is online (after ${waited}s)"
       mm_running=true
@@ -559,28 +512,27 @@ perform_healthcheck() {
       pm2 logs "$PM2_PROCESS_NAME" --lines 20 --nostream 2>&1 | tee -a "$LOG_FILE" || true
       return 1
     fi
-    
     log "Waiting... ($waited/${HEALTHCHECK_TIMEOUT}s) - status: $pm2_status"
   done
-  
+
   if [ "$mm_running" != true ]; then
     log "✗ MagicMirror did not start within ${HEALTHCHECK_TIMEOUT}s"
     log_error "MagicMirror Healthcheck fehlgeschlagen - Prozess startete nicht innerhalb von ${HEALTHCHECK_TIMEOUT}s"
     return 1
   fi
-  
+
   # HTTP Healthcheck wenn möglich
   if [ -n "$http_tool" ]; then
     log "Performing HTTP healthcheck on $HEALTHCHECK_URL..."
     sleep 5  # Kurz warten bis Server bereit
-    
-    local http_success=false
-    local http_attempts=0
-    local http_max_attempts=3
-    
+
+    http_success=false
+    http_attempts=0
+    http_max_attempts=3
+
     while [ $http_attempts -lt $http_max_attempts ]; do
       http_attempts=$((http_attempts + 1))
-      
+
       if [ "$http_tool" = "curl" ]; then
         if curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$HEALTHCHECK_URL" 2>/dev/null | grep -qE "^(200|302)$"; then
           http_success=true
@@ -592,11 +544,11 @@ perform_healthcheck() {
           break
         fi
       fi
-      
+
       log "HTTP check attempt $http_attempts failed, retrying..."
       sleep 3
     done
-    
+
     if [ "$http_success" = true ]; then
       log "✓ HTTP healthcheck passed - MagicMirror is responding"
     else
@@ -604,7 +556,7 @@ perform_healthcheck() {
       log "  (This might be normal if MagicMirror is configured for local display only)"
     fi
   fi
-  
+
   log "=== Healthcheck Complete ==="
   send_email "Healthcheck erfolgreich" "MagicMirror läuft nach dem Update korrekt." "success"
   return 0
