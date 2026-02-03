@@ -528,4 +528,30 @@ Automatische Electron-Prüfung & Selbstheilung (ab Februar 2026)
   - `✓ npm install im MagicMirror-Ordner erfolgreich (electron installiert)`
   - `✓ Electron ist im MagicMirror-Ordner installiert`
 
-**Manuelle Reparatur ist damit nicht mehr nötig!`
+**Manuelle Reparatur ist damit nicht mehr nötig!**
+
+Log als E-Mail-Anhang (ab Februar 2026)
+---------------------------------------
+**Neu:** Das Skript kann die Log-Datei automatisch als E-Mail-Anhang versenden.
+
+**Konfiguration:**
+- `EMAIL_ATTACH_LOG=true` (Standard: true) – aktiviert das Versenden der Log-Datei als Anhang
+- Unterstützte Mail-Tools: `mail`, `msmtp`, `sendmail` (automatische Erkennung)
+
+**Vorteile:**
+- Die vollständige Log-Datei wird als Anhang an die E-Mail gehängt (bei Erfolg oder Fehler)
+- Erleichtert die Fehleranalyse und Nachverfolgung von Updates
+- Funktioniert mit allen unterstützten E-Mail-Tools automatisch
+
+**Ablauf:**
+1. Nach jedem Update-Lauf prüft das Skript, ob E-Mail-Benachrichtigungen aktiviert sind
+2. Ist `EMAIL_ATTACH_LOG=true` und ein unterstütztes Mail-Tool vorhanden, wird die Log-Datei als Anhang versendet
+3. Im Log erscheint z.B.:
+   - `E-Mail mit Log-Anhang gesendet an ... (via mail/msmtp/sendmail)`
+   - `WARNING: Kein Mail-Tool mit Anhang-Unterstützung gefunden, sende E-Mail ohne Anhang.`
+
+**Hinweis:**
+- Die Option funktioniert nur, wenn ein unterstütztes Mail-Tool installiert und konfiguriert ist
+- Bei Problemen erscheint eine Warnung im Log
+- Die Log-Datei wird nur als Anhang versendet, wenn sie existiert und E-Mail-Benachrichtigungen aktiviert sind
+- Die Option kann in der Konfiguration oder direkt im Skript gesetzt werden
