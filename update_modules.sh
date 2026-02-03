@@ -73,6 +73,9 @@ EMAIL_SUBJECT_PREFIX="[MagicMirror Update]"  # Betreff-Präfix für E-Mails
 EMAIL_ON_SUCCESS=true                       # true = auch bei erfolgreichen Updates E-Mail senden
 EMAIL_ON_ERROR=true                          # true = bei Fehlern E-Mail senden
 
+# --- E-Mail Log-Anhang ---
+EMAIL_ATTACH_LOG=false                      # true = Log-Datei als Anhang senden (mail/msmtp/sendmail erforderlich)
+
 # --- Log-Rotation ---
 LOG_ROTATION_ENABLED=true                    # true = alte Logs automatisch rotieren
 LOG_MAX_SIZE_KB=5120                         # maximale Log-Größe in KB bevor rotiert wird (5MB)
@@ -162,6 +165,45 @@ send_email() {
   fi
   
   if [ -z "$EMAIL_RECIPIENT" ]; then
+      if [ "$EMAIL_ATTACH_LOG" = true ] && [ -f "$LOG_FILE" ]; then
+        if command -v mail >/dev/null 2>&1; then
+          echo "$full_body" | mail -s "$full_subject" -a "$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
+          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via mail)"
+          return 0
+        elif command -v msmtp >/dev/null 2>&1; then
+          {
+            echo "To: $EMAIL_RECIPIENT"
+            echo "Subject: $full_subject"
+            echo "Content-Type: text/plain; charset=utf-8"
+            echo ""
+            echo "$full_body"
+          } | msmtp --attach="$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
+          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via msmtp)"
+          return 0
+        elif command -v sendmail >/dev/null 2>&1; then
+          {
+            echo "To: $EMAIL_RECIPIENT"
+            echo "Subject: $full_subject"
+            echo "MIME-Version: 1.0"
+            echo "Content-Type: multipart/mixed; boundary=\"LOGBOUNDARY\""
+            echo ""
+            echo "--LOGBOUNDARY"
+            echo "Content-Type: text/plain; charset=utf-8"
+            echo ""
+            echo "$full_body"
+            echo "--LOGBOUNDARY"
+            echo "Content-Type: text/plain; name=update_modules.log"
+            echo "Content-Disposition: attachment; filename=update_modules.log"
+            echo ""
+            cat "$LOG_FILE"
+            echo "--LOGBOUNDARY--"
+          } | sendmail -t 2>/dev/null
+          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via sendmail)"
+          return 0
+        fi
+        # Fallback: Wenn kein Tool mit Anhang, sende wie bisher
+        log "WARNING: Kein Mail-Tool mit Anhang-Unterstützung gefunden, sende E-Mail ohne Anhang."
+      fi
     log "WARNING: EMAIL_ENABLED=true but EMAIL_RECIPIENT is empty"
     return 1
   fi
@@ -621,6 +663,30 @@ fi
 
 # Check Node.js version before proceeding
 check_and_update_nodejs
+
+# Prüft, ob electron im MagicMirror-Ordner installiert ist, und führt ggf. npm install aus
+ensure_electron_installed() {
+  local mm_dir="$MAGICMIRROR_DIR"
+  if [ ! -d "$mm_dir/node_modules/.bin" ] || [ ! -f "$mm_dir/node_modules/.bin/electron" ]; then
+    log "Electron nicht gefunden – führe npm install im MagicMirror-Ordner aus..."
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) würde im $mm_dir: npm install ausführen"
+    else
+      pushd "$mm_dir" >/dev/null
+      if npm install 2>&1 | tee -a "$LOG_FILE"; then
+        log "✓ npm install im MagicMirror-Ordner erfolgreich (electron installiert)"
+      else
+        log "✗ npm install im MagicMirror-Ordner fehlgeschlagen – electron fehlt weiterhin!"
+      fi
+      popd >/dev/null
+    fi
+  else
+    log "✓ Electron ist im MagicMirror-Ordner installiert"
+  fi
+}
+
+# Sicherstellen, dass electron installiert ist, bevor MagicMirror gestartet wird
+ensure_electron_installed
 
 updated_any=false
 

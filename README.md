@@ -506,3 +506,26 @@ Troubleshooting
   - Das Skript installiert ffmpeg automatisch falls nicht vorhanden
   - Manuelle Installation: `sudo apt-get update && sudo apt-get install -y ffmpeg`
   - Überprüfung: `which ffmpeg && ffmpeg -version`
+
+Automatische Electron-Prüfung & Selbstheilung (ab Februar 2026)
+--------------------------------------------------------------
+**Neu:** Das Skript prüft vor jedem Update-Lauf, ob Electron im MagicMirror-Hauptverzeichnis installiert ist. Falls nicht, wird automatisch `npm install` im MagicMirror-Ordner ausgeführt.
+
+**Vorteile:**
+- Verhindert zuverlässig den Fehler `./node_modules/.bin/electron: not found` nach Updates oder gelöschten node_modules
+- Keine manuellen Reparaturen mehr nötig – das Skript erkennt und behebt fehlende Electron-Installation selbst
+- Funktioniert auch nach Node.js- oder MagicMirror-Core-Updates automatisch
+
+**Ablauf:**
+1. Nach dem Node.js-Check prüft das Skript, ob `node_modules/.bin/electron` im MagicMirror-Ordner existiert
+2. Falls nicht, wird automatisch `npm install` im MagicMirror-Hauptverzeichnis ausgeführt
+3. Erst danach werden MagicMirror und die Module wie gewohnt aktualisiert und gestartet
+
+**Hinweis:**
+- Diese Prüfung läuft immer automatisch – kein Eingriff nötig
+- Im Log erscheint z.B.:
+  - `Electron nicht gefunden – führe npm install im MagicMirror-Ordner aus...`
+  - `✓ npm install im MagicMirror-Ordner erfolgreich (electron installiert)`
+  - `✓ Electron ist im MagicMirror-Ordner installiert`
+
+**Manuelle Reparatur ist damit nicht mehr nötig!`
