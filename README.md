@@ -555,3 +555,28 @@ Log als E-Mail-Anhang (ab Februar 2026)
 - Bei Problemen erscheint eine Warnung im Log
 - Die Log-Datei wird nur als Anhang versendet, wenn sie existiert und E-Mail-Benachrichtigungen aktiviert sind
 - Die Option kann in der Konfiguration oder direkt im Skript gesetzt werden
+
+Automatische Log-Fehlerprüfung & Selbstheilung (ab Februar 2026)
+--------------------------------------------------------------
+**Neu:** Das Skript prüft nach jedem Lauf automatisch die Log-Datei auf typische Fehler und versucht, diese direkt zu beheben.
+
+**Erkannte & automatisch behandelte Fehler (Beispiele):**
+- **electron: not found / electron fehlt**: Automatisches `npm install` im MagicMirror-Ordner
+- **Cannot find module 'datauri'**: Automatisches `npm install datauri` im RTSPStream-Modul
+- **Git-Lock-Fehler (index.lock/Another git process)**: Entfernt alle `index.lock`-Dateien in allen Repos
+- **Berechtigungsfehler (chown/permission denied)**: Setzt Besitzrechte auf `$CHOWN_USER` für MagicMirror und alle Module
+- **npm cache Fehler**: Leert den npm cache automatisch
+- **Fehlende package-lock.json**: Führt `npm install` in allen betroffenen Modulen aus
+- **npm audit Schwachstellen**: Führt automatisch `npm audit fix` im MagicMirror-Hauptverzeichnis aus
+
+**Ablauf:**
+1. Nach jedem Update-Lauf wird die Log-Datei nach bekannten Fehlermustern durchsucht
+2. Für jeden erkannten Fehler wird eine passende Korrektur automatisch ausgeführt
+3. Nach Korrekturversuchen wird eine E-Mail-Benachrichtigung versendet (wenn aktiviert)
+4. Alle Aktionen werden im Log dokumentiert
+
+**Hinweise:**
+- Die Fehlerprüfung erkennt nur bekannte Muster – neue Fehler können ergänzt werden
+- Kritische oder nicht automatisch behebbare Fehler erfordern weiterhin manuelles Eingreifen
+- Die Funktion kann leicht um weitere Fehler/Korrekturen erweitert werden
+- Nach Änderungen empfiehlt sich ein Testlauf mit absichtlich erzeugten Fehlern

@@ -68,7 +68,7 @@ REBOOT_ONLY_ON_UPDATES=true                  # true = only reboot if updates wer
 
 # --- E-Mail Benachrichtigungen ---
 EMAIL_ENABLED=false                          # true = E-Mail bei kritischen Fehlern senden
-EMAIL_RECIPIENT=""      # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
+EMAIL_RECIPIENT=""                            # E-Mail-Adresse für Benachrichtigungen (z.B. "user@example.com")
 EMAIL_SUBJECT_PREFIX="[MagicMirror Update]"  # Betreff-Präfix für E-Mails
 EMAIL_ON_SUCCESS=false                       # true = auch bei erfolgreichen Updates E-Mail senden
 EMAIL_ON_ERROR=true                          # true = bei Fehlern E-Mail senden
@@ -1819,3 +1819,98 @@ fi
 
 log "Update run finished"
 exit 0
+
+# --- Automatische Log-Fehlerprüfung & Korrektur (ab Feb 2026) ---
+scan_and_fix_log_errors() {
+  local logfile="$LOG_FILE"
+  local error_found=false
+  local fix_attempted=false
+  if [ ! -f "$logfile" ]; then
+    return 0
+  fi
+  # Prüfe typische Fehler im Log
+  if grep -qiE "electron.*not found|electron fehlt|npm install im MagicMirror-Ordner fehlgeschlagen" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: electron-Fehler erkannt im Log. Versuche npm install im MagicMirror-Ordner..."
+    pushd "$MAGICMIRROR_DIR" >/dev/null
+    if npm install 2>&1 | tee -a "$LOG_FILE"; then
+      log "Automatische Korrektur: npm install erfolgreich ausgeführt (electron installiert)"
+      fix_attempted=true
+    else
+      log "Automatische Korrektur: npm install fehlgeschlagen! Bitte manuell prüfen."
+    fi
+    popd >/dev/null
+  fi
+  # Git-Lock-Fehler erkennen und beheben
+  if grep -qiE "index.lock|Another git process" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: Git-Lock-Fehler erkannt. Entferne index.lock Dateien in allen Modulen..."
+    find "$MODULES_DIR" -type f -name "index.lock" -exec rm -f {} \; 2>/dev/null
+    find "$MAGICMIRROR_DIR" -type f -name "index.lock" -exec rm -f {} \; 2>/dev/null
+    log "Automatische Korrektur: Alle index.lock Dateien entfernt."
+    fix_attempted=true
+  fi
+  # Fehlende Berechtigungen (chown)
+  if grep -qiE "chown failed|sudo chown failed|permission denied" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: Berechtigungsfehler erkannt. Setze Besitzrechte auf $CHOWN_USER..."
+    chown -R "$CHOWN_USER":"$CHOWN_USER" "$MAGICMIRROR_DIR" 2>&1 | tee -a "$LOG_FILE"
+    chown -R "$CHOWN_USER":"$CHOWN_USER" "$MODULES_DIR" 2>&1 | tee -a "$LOG_FILE"
+    log "Automatische Korrektur: Besitzrechte gesetzt."
+    fix_attempted=true
+  fi
+  # npm cache Fehler
+  if grep -qiE "npm cache.*corrupt|npm ERR! cache" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: npm cache Fehler erkannt. Leere npm cache..."
+    npm cache clean --force 2>&1 | tee -a "$LOG_FILE"
+    log "Automatische Korrektur: npm cache geleert."
+    fix_attempted=true
+  fi
+  # Fehlende package-lock.json
+  if grep -qiE "ENOENT.*package-lock.json" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: Fehlende package-lock.json erkannt. Führe npm install in allen Modulen aus..."
+    for mod in "$MODULES_DIR"/*; do
+      [ -d "$mod" ] || continue
+      if [ -f "$mod/package.json" ] && [ ! -f "$mod/package-lock.json" ]; then
+        pushd "$mod" >/dev/null
+        npm install 2>&1 | tee -a "$LOG_FILE"
+        popd >/dev/null
+      fi
+    done
+    log "Automatische Korrektur: npm install für fehlende package-lock.json durchgeführt."
+    fix_attempted=true
+  fi
+  # npm audit fix bei bekannten Schwachstellen
+  if grep -qiE "npm audit report|found [0-9]+ vulnerabilities" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: npm audit Schwachstellen erkannt. Versuche npm audit fix in MagicMirror..."
+    pushd "$MAGICMIRROR_DIR" >/dev/null
+    npm audit fix --force 2>&1 | tee -a "$LOG_FILE"
+    popd >/dev/null
+    log "Automatische Korrektur: npm audit fix durchgeführt."
+    fix_attempted=true
+  fi
+  # Weitere typische Fehler prüfen und ggf. korrigieren
+  if grep -qiE "Cannot find module 'datauri'|datauri FAIL" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: datauri-Fehler erkannt im Log. Versuche npm install datauri..."
+    pushd "$MODULES_DIR/MMM-RTSPStream" >/dev/null
+    if npm install datauri 2>&1 | tee -a "$LOG_FILE"; then
+      log "Automatische Korrektur: datauri erfolgreich installiert."
+      fix_attempted=true
+    else
+      log "Automatische Korrektur: Installation von datauri fehlgeschlagen! Bitte manuell prüfen."
+    fi
+    popd >/dev/null
+  fi
+  # Bei Fehlern E-Mail senden
+  if [ "$error_found" = true ]; then
+    send_email "Automatische Log-Fehlerkorrektur" "Fehler wurden im Log erkannt und Korrekturversuche durchgeführt. Details siehe Log." "error"
+  fi
+  return 0
+}
+
+# Am Ende des Skripts ausführen
+scan_and_fix_log_errors
