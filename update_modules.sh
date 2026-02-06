@@ -604,6 +604,61 @@ perform_healthcheck() {
   return 0
 }
 
+# System-Cleanup: Cache leeren, RAM freigeben, unnötige Pakete entfernen
+# Wird automatisch am Ende des Skripts ausgeführt
+cleanup_system() {
+  log "=== System-Cleanup wird gestartet ==="
+
+  if [ "$DRY_RUN" = true ]; then
+    log "(dry) würde System-Cleanup durchführen"
+    return 0
+  fi
+
+  # APT Cache leeren
+  log "Leere APT Cache..."
+  sudo_prefix=$(apt_get_prefix)
+  if [ -n "$sudo_prefix" ]; then
+    $sudo_prefix apt-get clean 2>&1 | tee -a "$LOG_FILE" || log "apt-get clean fehlgeschlagen"
+    $sudo_prefix apt-get autoclean 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoclean fehlgeschlagen"
+    $sudo_prefix apt-get autoremove --purge -y 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoremove fehlgeschlagen"
+  else
+    apt-get clean 2>&1 | tee -a "$LOG_FILE" || log "apt-get clean fehlgeschlagen"
+    apt-get autoclean 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoclean fehlgeschlagen"
+    apt-get autoremove --purge -y 2>&1 | tee -a "$LOG_FILE" || log "apt-get autoremove fehlgeschlagen"
+  fi
+
+  # Alte Log-Dateien bereinigen (journalctl)
+  log "Bereinige alte Systemlogs..."
+  if [ -n "$sudo_prefix" ]; then
+    $sudo_prefix journalctl --vacuum-time=7d 2>&1 | tee -a "$LOG_FILE" || log "journalctl vacuum fehlgeschlagen"
+  else
+    journalctl --vacuum-time=7d 2>&1 | tee -a "$LOG_FILE" || log "journalctl vacuum fehlgeschlagen"
+  fi
+
+  # User Cache leeren (nur wenn sicher)
+  if [ -d "$HOME/.cache" ]; then
+    log "Leere User-Cache..."
+    rm -rf "$HOME/.cache"/* 2>&1 | tee -a "$LOG_FILE" || log "User-Cache leeren teilweise fehlgeschlagen"
+  fi
+
+  # RAM Cache freigeben (Page Cache, dentries, inodes)
+  log "Gebe RAM-Cache frei..."
+  if [ -n "$sudo_prefix" ]; then
+    sync
+    $sudo_prefix sysctl -w vm.drop_caches=3 2>&1 | tee -a "$LOG_FILE" || log "RAM-Cache freigeben fehlgeschlagen"
+  else
+    sync
+    sysctl -w vm.drop_caches=3 2>&1 | tee -a "$LOG_FILE" || log "RAM-Cache freigeben fehlgeschlagen"
+  fi
+
+  # Zeige freien Speicher nach Cleanup
+  log "Speichernutzung nach Cleanup:"
+  free -h 2>&1 | tee -a "$LOG_FILE"
+
+  log "=== System-Cleanup abgeschlossen ==="
+  return 0
+}
+
 # Final-exit handler: if requested, reboot the Pi after the script finishes.
 # This runs on EXIT (normal or due to error). We skip the reboot when DRY_RUN=true.
 on_exit_handler() {
@@ -611,7 +666,10 @@ on_exit_handler() {
   
   # Always clean up temp files first
   cleanup_temp_files
-  
+
+  # Perform system cleanup (cache, RAM, old packages)
+  cleanup_system
+
   # Do not reboot in dry-run mode
   if [ "${DRY_RUN:-false}" = true ]; then
     log "DRY_RUN=true — skipping final reboot (exit code $rc)"
