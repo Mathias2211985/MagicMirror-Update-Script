@@ -2,13 +2,21 @@ Update Modules Script for Raspberry Pi
 
 This folder contains a script to automatically update MagicMirror modules (git + npm) and optionally restart the pm2 process.
 
+**🆕 Bugfixes & Verbesserungen (Februar 2026)**
+- ✓ **Speicherplatz-Check**: Prüft vor dem Start ob mindestens 200MB frei sind — verhindert kaputte Module durch volle Festplatte
+- ✓ **npm nur bei Änderungen**: `npm ci`/`npm install` wird nur noch ausgeführt wenn das Modul tatsächlich aktualisiert wurde oder `node_modules` fehlt. Verhindert, dass `npm ci` bei Netzwerkfehlern funktionierende Module zerstört
+- ✓ **npm 11 Kompatibilität**: `--only=production` durch `--omit=dev` ersetzt (npm 11+ unterstützt den alten Flag nicht mehr)
+- ✓ **Zähler-Bug behoben**: Update-Zähler enthielt Zeilenumbruch, was zu `integer expression expected`-Fehlern führte
+- ✓ **Backup-Cleanup erweitert**: Config- und CSS-Backups werden jetzt auch automatisch aufgeräumt (max. 4 behalten)
+- ✓ **Log-Fehlerprüfung erreichbar**: `scan_and_fix_log_errors` wurde vor `exit 0` verschoben (war vorher unerreichbar)
+
 **🆕 Neue Features (Januar 2026)**
 - ✓ **E-Mail-Benachrichtigungen**: Optional bei Fehlern oder erfolgreichen Updates
 - ✓ **Log-Rotation**: Automatische Rotation wenn Log zu groß wird (Standard: 5MB)
 - ✓ **Externe Konfiguration**: Config-Datei statt Skript editieren
 - ✓ **Healthcheck vor Reboot**: Prüft ob MagicMirror läuft bevor Neustart
 - ✓ **Lockfile**: Verhindert parallele Ausführungen
-- ✓ **Backup-Cleanup**: Alte Backups werden automatisch gelöscht (behält 5)
+- ✓ **Backup-Cleanup**: Alte Backups werden automatisch gelöscht (behält 4)
 
 **🆕 Cron-Optimierungen & Update-Zuverlässigkeit (Januar 2026)**
 - ✓ **Garantierte Module-Updates**: Verbesserte git pull Logik erkennt verfügbare Updates zuverlässig
@@ -267,13 +275,15 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
   - **Branch-Erkennung**: Funktioniert automatisch mit `main`, `master` oder jedem anderen Branch
   - **Detailliertes Logging**: Zeigt alte und neue Commit-Hashes bei erfolgreichen Updates
 
-- **Intelligente npm-Strategie**:
+- **Intelligente npm-Strategie (verbessert 02/2026)**:
+  - npm wird **nur ausgeführt** wenn das Modul tatsächlich aktualisiert wurde oder `node_modules` fehlt
+  - Unveränderte Module mit vorhandenen `node_modules` werden übersprungen — verhindert, dass `npm ci` bei Netzwerkfehlern funktionierende Module zerstört
   - Nach Git-Updates mit `package-lock.json` → automatisch `npm ci` für saubere, deterministische Installation
-  - Ohne Git-Update oder ohne Lockfile → `npm install` für maximale Flexibilität
+  - Ohne Git-Update oder ohne Lockfile → `npm install` für maximale Flexibilität (sicherer, löscht node_modules nicht)
   - 3-stufiges Fallback-System bei Fehlern:
     1. `npm ci` (wenn Lockfile vorhanden)
     2. `npm install` (Standard-Fallback)
-    3. `npm install --only=production` (letzter Ausweg für Kompatibilität)
+    3. `npm install --omit=dev` (letzter Ausweg für Kompatibilität)
 
 - **Update-Statistiken am Ende**:
   ```
@@ -295,7 +305,7 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
 - **Lokale Änderungen**: Werden automatisch verworfen wenn `AUTO_DISCARD_LOCAL=true` (Standard) via `git reset --hard` + `git clean -fdx`
 
 **Modul-spezifische Overrides** (nur für Sonderfälle):
-- **MMM-Webuntis**: Verwendet `npm install --only=production` wegen Kompatibilitätsproblemen mit sehr alten npm-Versionen
+- **MMM-Webuntis**: Verwendet `npm install --omit=dev` (dev-Dependencies werden übersprungen)
 - **MMM-RTSPStream**: Spezielle Behandlung bei Git-Updates:
   - **Vollständige Bereinigung**: `node_modules` und `package-lock.json` werden entfernt
   - **ffmpeg-Überprüfung**: Automatische Installation falls ffmpeg fehlt
@@ -317,11 +327,12 @@ Automatisches Raspbian-Update und System-Neustart
 Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Update durch und startet den Raspberry Pi neu, **aber nur wenn Updates installiert wurden**.
 
 **Update-Ablauf:**
-1. **MagicMirror Core Update**: `git pull && node --run install-mm` im MagicMirror-Hauptverzeichnis
-2. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module
-3. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
-4. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade
-5. **System-Neustart**: Kompletter Reboot des Pi **nur wenn Updates installiert wurden**
+1. **Speicherplatz-Check**: Prüft ob mindestens 200MB frei sind (bricht bei zu wenig Platz ab)
+2. **MagicMirror Core Update**: `git pull && node --run install-mm` im MagicMirror-Hauptverzeichnis
+3. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module (npm nur bei tatsächlichen Änderungen)
+4. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
+5. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade (max. 4 Backups)
+6. **System-Neustart**: Kompletter Reboot des Pi **nur wenn Updates installiert wurden**
 
 Konfiguration in `update_modules.sh`:
 
@@ -335,7 +346,7 @@ REBOOT_ONLY_ON_UPDATES=true     # Nur neustarten wenn Updates da sind (empfohlen
 
 **Details und Hinweise:**
 - Das Skript verwendet `DEBIAN_FRONTEND=noninteractive` und `apt-get full-upgrade` mit Dpkg-Optionen, um interaktive Dialoge zu vermeiden.
-- Vor dem Upgrade wird (wenn aktiviert) ein komprimiertes Backup deines `modules`-Ordners nach `~/module_backups/` geschrieben.
+- Vor dem Upgrade wird (wenn aktiviert) ein komprimiertes Backup deines `modules`-Ordners nach `~/module_backups/` geschrieben (max. 4 Backups, ältere werden automatisch gelöscht).
 - `apt-get full-upgrade` ist mächtiger als `upgrade`: es kann Abhängigkeiten anlegen und Pakete entfernen. Daher ist ein Backup empfehlenswert.
 - Das Skript behandelt apt/dpkg-Locks mit einem Retry/Backoff-Mechanismus (bis zu 4 Versuche).
 - **Intelligenter Reboot**: System startet nur neu wenn `updated_any=true` (Updates wurden installiert)
@@ -352,10 +363,6 @@ Bevor du ein automatisches full-upgrade in Produktion nutzt, empfehle ich einen 
 
 ```bash
 DRY_RUN=true ~/scripts/update_modules.sh
-```or du ein automatisches full-upgrade in Produktion nutzt, empfehle ich einen Dry‑Run:
-
-```
-DRY_RUN=true ~/scripts/update_modules.sh
 ```
 
 
@@ -365,7 +372,7 @@ Hinweise und Edge-Cases
 - **Git Pull**: Das Skript verwendet `git pull --ff-only` mit automatischem Fallback zu `git reset --hard origin/branch` falls Updates verfügbar sind aber pull versagt.
 - **Update-Erkennung**: Nach `git fetch` wird die Anzahl verfügbarer Commits geprüft - funktioniert zuverlässig mit allen Branches (main/master/etc.).
 - **npm**: Universelle Strategie für alle Module - automatische Wahl zwischen `npm ci` und `npm install` basierend auf Git-Update-Status und Lockfile-Vorhandensein.
-- **npm Fallbacks**: Bei Fehlern probiert das Skript automatisch alternative npm-Befehle (ci → install → install --only=production) für maximale Kompatibilität.
+- **npm Fallbacks**: Bei Fehlern probiert das Skript automatisch alternative npm-Befehle (ci → install → install --omit=dev) für maximale Kompatibilität.
 - **pm2**: Das Skript prüft und konfiguriert pm2-Autostart, bereinigt fehlerhafte Prozesse und stellt sicher, dass der systemd-Service aktiviert ist.
 - **npm Warnungen**: Deprecation-Warnungen bei älteren Modulen (z.B. rimraf, eslint) sind normal und unkritisch für lokale MagicMirror-Installation.
 - **Security Vulnerabilities**: Low/High Vulnerabilities in Dev-Dependencies (jsdoc, eslint) sind für lokal laufende Module unkritisch und können ignoriert werden.
@@ -399,6 +406,29 @@ pm2 list
 ```
 
 Troubleshooting
+
+**Speicherplatz voll / Module kaputt nach Update**
+- **Problem**: `No space left on device`-Fehler, Module ohne `node_modules`, PM2 kann nicht speichern
+- **Ursache**: SD-Karte voll — `npm ci` löscht `node_modules` vor der Neuinstallation, bei Netzwerkfehler bleiben Module dann ohne Dependencies
+- **Lösung (automatisch seit 02/2026)**:
+  - Das Skript prüft vor dem Start ob mindestens 200MB frei sind und bricht bei zu wenig Platz ab
+  - npm wird nur noch ausgeführt wenn sich ein Modul tatsächlich geändert hat oder `node_modules` fehlt
+  - Alte Backups (Module, Config, CSS) werden automatisch aufgeräumt (max. 4 behalten)
+- **Manuelle Reparatur bei vollem Speicher**:
+  ```bash
+  # Speicher prüfen
+  df -h
+  # Alte Backups löschen
+  rm -rf ~/module_backups/*.tar.gz
+  # npm Cache löschen
+  sudo npm cache clean --force
+  # apt Cache löschen
+  sudo apt-get clean
+  # Alte Logs löschen
+  sudo journalctl --vacuum-size=50M
+  # Dann kaputte Module reparieren
+  cd /home/pi/MagicMirror/modules/MODULNAME && npm install
+  ```
 
 **Module Updates werden nicht erkannt (z.B. CalendarExt3)**
 - **Problem**: `git pull: already up-to-date` wird gemeldet, obwohl Updates verfügbar sind
@@ -492,7 +522,7 @@ Troubleshooting
   - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates
   - Manuelle Fix: `cd /home/pi/MagicMirror/modules/MMM-Fuel && rm -rf node_modules && npm install`
 
-- **npm-Befehl schlägt fehl**: Skript probiert automatisch Alternativen (ci → install → install --only=production)
+- **npm-Befehl schlägt fehl**: Skript probiert automatisch Alternativen (ci → install → install --omit=dev)
 
 - **pm2 startet nicht automatisch**: Prüfe `sudo systemctl status pm2-pi` und ob `pm2 save` ausgeführt wurde
 

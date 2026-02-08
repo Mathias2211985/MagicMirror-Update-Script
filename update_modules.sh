@@ -719,6 +719,31 @@ if [ ! -d "$MODULES_DIR" ]; then
   exit 1
 fi
 
+# Check available disk space before proceeding (minimum 200MB required)
+check_disk_space() {
+  local min_space_kb=204800  # 200MB in KB
+  local available_kb
+  available_kb=$(df -k "$MODULES_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+
+  if [ -z "$available_kb" ] || [ "$available_kb" -eq 0 ] 2>/dev/null; then
+    log "WARNING: Could not determine available disk space"
+    return 0
+  fi
+
+  local available_mb=$((available_kb / 1024))
+  log "Available disk space: ${available_mb}MB"
+
+  if [ "$available_kb" -lt "$min_space_kb" ]; then
+    log "ERROR: Not enough disk space! ${available_mb}MB available, minimum 200MB required."
+    log "Please free up disk space before running updates."
+    log "Suggestions: rm -rf ~/module_backups/*.tar.gz; sudo apt-get clean; npm cache clean --force"
+    log_error "Update abgebrochen: Nur ${available_mb}MB Speicherplatz frei (mindestens 200MB benötigt)."
+    exit 1
+  fi
+}
+
+check_disk_space
+
 # Check Node.js version before proceeding
 check_and_update_nodejs
 
@@ -1016,18 +1041,44 @@ backup_modules() {
   if tar -czf "$archive" -C "$(dirname "$MODULES_DIR")" "$(basename "$MODULES_DIR")" 2>&1 | tee -a "$LOG_FILE"; then
     log "Backup created: $archive"
     
-    # Clean up old backups - keep only the last 5
-    log "Cleaning up old backups (keeping last 5)..."
+    # Clean up old backups - keep only the last 4
+    log "Cleaning up old backups (keeping last 4)..."
     backup_count=$(find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f 2>/dev/null | wc -l)
-    if [ "$backup_count" -gt 5 ]; then
+    if [ "$backup_count" -gt 4 ]; then
       find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f -printf '%T+ %p\n' 2>/dev/null | \
-        sort | head -n -5 | cut -d' ' -f2- | while read -r old_backup; do
+        sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
         log "Removing old backup: $old_backup"
         rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
       done
-      log "Old backups cleaned up"
+      log "Old module backups cleaned up"
     fi
-    
+
+    # Clean up old config backups - keep only the last 4
+    if [ -d "$BACKUP_DIR/config_backups" ]; then
+      config_backup_count=$(find "$BACKUP_DIR/config_backups" -name "config_*.js" -type f 2>/dev/null | wc -l)
+      if [ "$config_backup_count" -gt 4 ]; then
+        find "$BACKUP_DIR/config_backups" -name "config_*.js" -type f -printf '%T+ %p\n' 2>/dev/null | \
+          sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
+          log "Removing old config backup: $old_backup"
+          rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+        done
+        log "Old config backups cleaned up"
+      fi
+    fi
+
+    # Clean up old CSS backups - keep only the last 4
+    if [ -d "$BACKUP_DIR/css_backups" ]; then
+      css_backup_count=$(find "$BACKUP_DIR/css_backups" -name "custom_*.css" -type f 2>/dev/null | wc -l)
+      if [ "$css_backup_count" -gt 4 ]; then
+        find "$BACKUP_DIR/css_backups" -name "custom_*.css" -type f -printf '%T+ %p\n' 2>/dev/null | \
+          sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
+          log "Removing old CSS backup: $old_backup"
+          rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+        done
+        log "Old CSS backups cleaned up"
+      fi
+    fi
+
     return 0
   else
     log "Backup FAILED for $MODULES_DIR"
@@ -1257,14 +1308,21 @@ for mod in "$MODULES_DIR"/*; do
     log "Not a git repo"
   fi
 
-  # 2) npm update/install if package.json L
-  if [ -f "$mod/package.json" ]; then
-    log "package.json found — running npm (mode depends on module)"
-    
+  # 2) npm update/install if package.json exists
+  # IMPORTANT: Only run npm if the module was actually updated via git OR node_modules is missing.
+  # Running npm ci on unchanged modules is dangerous: it deletes node_modules first,
+  # and if npm then fails (e.g. network error), the module is left broken without dependencies.
+  if [ -f "$mod/package.json" ] && { [ "${module_git_updated:-false}" = "true" ] || [ ! -d "$mod/node_modules" ]; }; then
+    if [ "${module_git_updated:-false}" = "true" ]; then
+      log "package.json found and module was updated — running npm"
+    else
+      log "package.json found and node_modules missing — running npm to restore dependencies"
+    fi
+
     # Universal npm strategy: use npm ci for clean install if lockfile L and module was git-updated
     # Otherwise use npm install for flexibility
     npm_special_cmd=""
-    
+
     # If module was just updated via git, prefer clean install to avoid dependency conflicts
     if [ "${module_git_updated:-false}" = "true" ] && [ -f "$mod/package-lock.json" ]; then
       npm_special_cmd="ci"
@@ -1336,8 +1394,8 @@ for mod in "$MODULES_DIR"/*; do
     # Module-specific overrides (only add if absolutely necessary for specific modules)
     case "$name" in
       MMM-Webuntis)
-        # Some npm versions do not support `--omit=dev`. Use a broader install to be compatible.
-        npm_special_cmd="install --only=production"
+        # npm 11+ removed --only=production, use --omit=dev instead
+        npm_special_cmd="install --omit=dev"
         log "Using module-specific override for $name: $npm_special_cmd"
         ;;
       # Add other module-specific overrides here only if the universal strategy fails
@@ -1399,11 +1457,11 @@ for mod in "$MODULES_DIR"/*; do
               fi
             fi
             
-            # Strategy 3: Last resort - install with production-only flag
+            # Strategy 3: Last resort - install with omit=dev flag
             if [ $rc -ne 0 ]; then
-              log "Fallback 3: Trying npm install --only=production"
-              if npm_exec --prefix "$modpath" install --only=production --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
-                log "Fallback npm install --only=production succeeded"
+              log "Fallback 3: Trying npm install --omit=dev"
+              if npm_exec --prefix "$modpath" install --omit=dev --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
+                log "Fallback npm install --omit=dev succeeded"
                 rc=0
                 chown_module "$modpath"
               else
@@ -1430,16 +1488,19 @@ for mod in "$MODULES_DIR"/*; do
           log "npm ($npm_special_cmd) ultimately failed for $name"
         fi
       else
-        # Universal strategy: prefer npm ci with lockfile, otherwise install
-        if [ -f "$mod/package-lock.json" ]; then
-          log "Universal strategy: Using npm ci (lockfile present)"
+        # Universal strategy:
+        # - If module was git-updated AND has lockfile: use npm ci for clean install
+        # - If node_modules is missing (needs restore): use npm install (safer, no wipe)
+        # - Otherwise: use npm install
+        if [ "${module_git_updated:-false}" = "true" ] && [ -f "$mod/package-lock.json" ]; then
+          log "Universal strategy: Using npm ci (lockfile present, module was updated)"
           if run_npm_with_fallback "$mod" "ci"; then
             updated_any=true
           else
             log "npm ci with fallbacks failed for $name"
           fi
         else
-          log "Universal strategy: Using npm install (no lockfile)"
+          log "Universal strategy: Using npm install (safe, preserves existing node_modules)"
           if run_npm_with_fallback "$mod" "install"; then
             updated_any=true
           else
@@ -1448,6 +1509,8 @@ for mod in "$MODULES_DIR"/*; do
         fi
       fi
     fi
+  elif [ -f "$mod/package.json" ]; then
+    log "package.json found but module unchanged and node_modules present — skipping npm"
   else
     log "No package.json — skipping npm"
   fi
@@ -1566,7 +1629,7 @@ for mod in "$MODULES_DIR"/*; do
 done
 
 # Read actual update count from tracker file
-modules_updated=$(grep -c "1" "$MODULE_UPDATE_TRACKER" 2>/dev/null || echo "0")
+modules_updated=$(grep -c "1" "$MODULE_UPDATE_TRACKER" 2>/dev/null) || modules_updated=0
 
 log ""
 log "=== Module Update Summary ==="
@@ -1875,9 +1938,6 @@ else
   log "pm2 not found - cannot configure autostart"
 fi
 
-log "Update run finished"
-exit 0
-
 # --- Automatische Log-Fehlerprüfung & Korrektur (ab Feb 2026) ---
 scan_and_fix_log_errors() {
   local logfile="$LOG_FILE"
@@ -1972,3 +2032,6 @@ scan_and_fix_log_errors() {
 
 # Am Ende des Skripts ausführen
 scan_and_fix_log_errors
+
+log "Update run finished"
+exit 0
