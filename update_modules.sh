@@ -1161,6 +1161,21 @@ for mod in "$MODULES_DIR"/*; do
   # Kill ffmpeg processes before updating RTSPStream
   kill_rtsp_ffmpeg_processes "$name"
 
+  # Protect custom data directories (e.g. mediamtx in MMM-RTSPStream) from git clean -fdx
+  # These directories are not tracked by git but must survive module updates
+  MEDIAMTX_BACKUP=""
+  if [ "$name" = "MMM-RTSPStream" ] && [ -d "$mod/mediamtx" ]; then
+    MEDIAMTX_BACKUP="/tmp/mediamtx_backup_$$"
+    log "Backing up mediamtx directory before update..."
+    if [ "$DRY_RUN" = false ]; then
+      cp -a "$mod/mediamtx" "$MEDIAMTX_BACKUP" 2>&1 | tee -a "$LOG_FILE" && \
+        log "✓ mediamtx directory backed up to $MEDIAMTX_BACKUP" || \
+        log "✗ Failed to backup mediamtx directory"
+    else
+      log "(dry) would backup mediamtx directory to $MEDIAMTX_BACKUP"
+    fi
+  fi
+
   # 1) Git update if repo
   if [ -d "$mod/.git" ]; then
     log "Found git repo"
@@ -1262,7 +1277,8 @@ for mod in "$MODULES_DIR"/*; do
             log "No origin/$branch — performing local hard reset"
             git reset --hard 2>&1 | tee -a "$LOG_FILE" || log "git reset failed for $name"
           fi
-          git clean -fdx 2>&1 | tee -a "$LOG_FILE" || true
+          # Exclude mediamtx directory from clean (used by MMM-RTSPStream for WebRTC proxy)
+          git clean -fdx -e "mediamtx/" 2>&1 | tee -a "$LOG_FILE" || true
           # attempt pull after discarding
           module_git_updated=false
           if git_pull_with_retry; then
@@ -1618,6 +1634,21 @@ for mod in "$MODULES_DIR"/*; do
     fi
   fi
   
+  # Restore mediamtx directory if it was backed up
+  if [ -n "$MEDIAMTX_BACKUP" ] && [ -d "$MEDIAMTX_BACKUP" ]; then
+    log "Restoring mediamtx directory after update..."
+    if [ "$DRY_RUN" = false ]; then
+      # Remove any incomplete mediamtx directory that git clone might have created
+      rm -rf "$mod/mediamtx" 2>/dev/null || true
+      cp -a "$MEDIAMTX_BACKUP" "$mod/mediamtx" 2>&1 | tee -a "$LOG_FILE" && \
+        log "✓ mediamtx directory restored successfully" || \
+        log "✗ Failed to restore mediamtx directory"
+      rm -rf "$MEDIAMTX_BACKUP" 2>/dev/null || true
+    else
+      log "(dry) would restore mediamtx directory from $MEDIAMTX_BACKUP"
+    fi
+  fi
+
   log "✓ Done: $name"
   exit 0  # Explicit success exit from subshell
   ) 
