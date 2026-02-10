@@ -9,6 +9,7 @@ This folder contains a script to automatically update MagicMirror modules (git +
 - ✓ **Zähler-Bug behoben**: Update-Zähler enthielt Zeilenumbruch, was zu `integer expression expected`-Fehlern führte
 - ✓ **Backup-Cleanup erweitert**: Config- und CSS-Backups werden jetzt auch automatisch aufgeräumt (max. 4 behalten)
 - ✓ **Log-Fehlerprüfung erreichbar**: `scan_and_fix_log_errors` wurde vor `exit 0` verschoben (war vorher unerreichbar)
+- ✓ **MediaMTX-Schutz**: Das `mediamtx/`-Verzeichnis in MMM-RTSPStream wird vor Updates gesichert und danach wiederhergestellt — WebRTC-Proxy überlebt Modul-Updates
 
 **🆕 Neue Features (Januar 2026)**
 - ✓ **E-Mail-Benachrichtigungen**: Optional bei Fehlern oder erfolgreichen Updates
@@ -320,6 +321,11 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
   - **Post-Install-Checks**: Überprüfung aller kritischen Dateien und ffmpeg-Zugriff aus Node.js
   - **Prozess-Cleanup**: Beendigung veralteter ffmpeg-Prozesse vor und nach Updates
   - **Pre-Reboot Health-Check**: Umfassende Überprüfung vor System-Neustart
+  - **MediaMTX-Schutz** (Neu 02/2026): Das `mediamtx/`-Verzeichnis (WebRTC-Proxy) wird bei Updates automatisch geschützt:
+    - Backup des `mediamtx/`-Verzeichnisses vor Git-Operationen nach `/tmp/`
+    - `git clean -fdx -e "mediamtx/"` schließt das Verzeichnis vom Löschen aus
+    - Automatische Wiederherstellung nach npm-Operationen
+    - MediaMTX-Binary und `mediamtx.yml`-Konfiguration bleiben erhalten
 - **MMM-Fuel**: Bei Git-Updates wird `node_modules` vor `npm ci` komplett gelöscht
 - Alle anderen Module nutzen die universelle Strategie automatisch
 Automatisches Raspbian-Update und System-Neustart
@@ -517,6 +523,40 @@ Troubleshooting
     pm2 restart MagicMirror
     pm2 logs MagicMirror --lines 50
     ```
+
+- **RTSPStream WebRTC/MediaMTX Setup**:
+  - MMM-RTSPStream nutzt MediaMTX als RTSP-zu-WebRTC-Proxy (installiert im Modul-Ordner unter `mediamtx/`)
+  - **Installation**:
+    ```bash
+    cd ~/MagicMirror/modules/MMM-RTSPStream/scripts
+    # Für Raspberry Pi 3 (ARMv7): ARCH im Skript auf "linux_armv7" ändern
+    # Für Raspberry Pi 4/5 (ARM64): ARCH auf "linux_arm64v8" ändern
+    nano setup_mediamtx.sh
+    chmod +x setup_mediamtx.sh && ./setup_mediamtx.sh
+    ```
+  - **Stream konfigurieren** in `mediamtx/mediamtx.yml`:
+    ```yaml
+    paths:
+      my_camera:
+        source: rtsp://user:pass@192.168.1.100:554/stream1
+    ```
+  - **Systemd-Service** für Autostart:
+    ```bash
+    sudo nano /etc/systemd/system/mediamtx.service
+    # ExecStart=/home/pi/MagicMirror/modules/MMM-RTSPStream/mediamtx/mediamtx /home/pi/MagicMirror/modules/MMM-RTSPStream/mediamtx/mediamtx.yml
+    sudo systemctl enable mediamtx && sudo systemctl start mediamtx
+    ```
+  - **MagicMirror config.js** — `whepUrl` muss zum Pfadnamen in `mediamtx.yml` passen:
+    ```js
+    stream1: {
+        name: "Kamera",
+        url: "rtsp://user:pass@192.168.1.100:554/stream1",
+        whepUrl: "http://localhost:8889/my_camera/whep"
+    }
+    ```
+  - **Hinweis**: Das Update-Skript schützt das `mediamtx/`-Verzeichnis automatisch bei Modul-Updates (Backup + Restore)
+  - **MediaMTX Status prüfen**: `sudo systemctl status mediamtx`
+  - **MediaMTX Logs**: `sudo journalctl -u mediamtx -f`
 
 - **Fuel-Modul zeigt keine Daten nach Update**: 
   - Gleiche Behandlung wie RTSPStream - automatische Bereinigung bei Git-Updates
