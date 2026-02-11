@@ -5,6 +5,10 @@ This folder contains a script to automatically update MagicMirror modules (git +
 **🆕 Bugfixes & Verbesserungen (Februar 2026)**
 - ✓ **Speicherplatz-Check**: Prüft vor dem Start ob mindestens 200MB frei sind — verhindert kaputte Module durch volle Festplatte
 - ✓ **npm nur bei Änderungen**: `npm ci`/`npm install` wird nur noch ausgeführt wenn das Modul tatsächlich aktualisiert wurde oder `node_modules` fehlt. Verhindert, dass `npm ci` bei Netzwerkfehlern funktionierende Module zerstört
+- ✓ **Netzwerk-Retry für npm**: Bei Netzwerkfehlern (`ECONNRESET`, `ETIMEDOUT`) werden npm-Befehle automatisch bis zu 3x mit 5 Sekunden Pause wiederholt — verhindert fehlgeschlagene Installationen durch temporäre Netzwerkprobleme
+- ✓ **Kritische Fehler-Tracking**: npm install Fehler werden jetzt getrackt und führen zu "⚠ Done with ERRORS" statt "✓ Done" — fehlgeschlagene Module werden in der Update-Summary als "failed" gezählt
+- ✓ **E-Mail bei kritischen Modul-Fehlern**: Bei fehlgeschlagenem npm install für wichtige Module (RTSPStream, Remote-Control, Camera, etc.) wird automatisch eine E-Mail mit Reparatur-Anleitung versendet
+- ✓ **Automatisches System-Cleanup**: Cache leeren (APT, User-Cache), RAM freigeben, alte Pakete entfernen und Systemlogs bereinigen — läuft automatisch bei jedem Update vor dem Neustart
 - ✓ **npm 11 Kompatibilität**: `--only=production` durch `--omit=dev` ersetzt (npm 11+ unterstützt den alten Flag nicht mehr)
 - ✓ **Zähler-Bug behoben**: Update-Zähler enthielt Zeilenumbruch, was zu `integer expression expected`-Fehlern führte
 - ✓ **Backup-Cleanup erweitert**: Config- und CSS-Backups werden jetzt auch automatisch aufgeräumt (max. 4 behalten)
@@ -281,6 +285,9 @@ Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manue
   - Unveränderte Module mit vorhandenen `node_modules` werden übersprungen — verhindert, dass `npm ci` bei Netzwerkfehlern funktionierende Module zerstört
   - Nach Git-Updates mit `package-lock.json` → automatisch `npm ci` für saubere, deterministische Installation
   - Ohne Git-Update oder ohne Lockfile → `npm install` für maximale Flexibilität (sicherer, löscht node_modules nicht)
+  - **Automatisches Retry bei Netzwerkfehlern**: Bei `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND` wird npm bis zu 3x mit 5 Sekunden Pause wiederholt
+  - **Fehler-Tracking**: Fehlgeschlagene npm installs werden getrackt und führen zu "⚠ Done with ERRORS" Status
+  - **E-Mail-Benachrichtigung**: Bei kritischen Modulen (RTSPStream, Remote-Control, etc.) wird automatisch eine E-Mail mit Reparatur-Anleitung versendet
   - 3-stufiges Fallback-System bei Fehlern:
     1. `npm ci` (wenn Lockfile vorhanden)
     2. `npm install` (Standard-Fallback)
@@ -338,7 +345,8 @@ Das Skript führt nach den Modul-Updates automatisch ein komplettes System-Updat
 3. **Modul-Updates**: Git pull + npm install für alle MagicMirror-Module (npm nur bei tatsächlichen Änderungen)
 4. **Raspbian-Update**: `sudo apt-get update && sudo apt-get full-upgrade` (nicht-interaktiv)
 5. **Backup**: Optionales tar.gz-Backup des modules-Ordners vor dem apt-upgrade (max. 4 Backups)
-6. **System-Neustart**: Kompletter Reboot des Pi **nur wenn Updates installiert wurden**
+6. **System-Cleanup**: Automatisches Aufräumen (Cache, RAM, alte Pakete) vor dem Neustart
+7. **System-Neustart**: Kompletter Reboot des Pi **nur wenn Updates installiert wurden**
 
 Konfiguration in `update_modules.sh`:
 
@@ -370,6 +378,35 @@ Bevor du ein automatisches full-upgrade in Produktion nutzt, empfehle ich einen 
 ```bash
 DRY_RUN=true ~/scripts/update_modules.sh
 ```
+
+Automatisches System-Cleanup (ab Februar 2026)
+---------------------------------
+**Neu:** Das Skript führt bei jedem Update automatisch ein System-Cleanup durch, um Speicherplatz freizugeben und die Performance zu verbessern.
+
+**Was wird aufgeräumt:**
+- ✓ **APT Cache**: `apt-get clean`, `autoclean` und `autoremove --purge` entfernen unnötige Pakete und Cache-Dateien
+- ✓ **Systemlogs**: `journalctl --vacuum-time=7d` behält nur die letzten 7 Tage an Logs
+- ✓ **User-Cache**: `~/.cache/*` wird geleert (Browser-Cache, Thumbnails, etc.)
+- ✓ **RAM-Cache**: Page Cache, dentries und inodes werden freigegeben (`sysctl -w vm.drop_caches=3`)
+- ✓ **Speichernutzung**: Nach dem Cleanup wird die aktuelle RAM-Nutzung ins Log geschrieben
+
+**Ablauf:**
+1. Das Cleanup läuft automatisch am Ende jedes Update-Durchlaufs
+2. Es wird **vor** einem eventuellen System-Neustart ausgeführt
+3. Bei `DRY_RUN=true` wird nur simuliert, was gemacht werden würde
+4. Alle Aktionen werden ins Log geschrieben
+5. Fehler beim Cleanup führen nicht zum Abbruch des Skripts
+
+**Vorteile:**
+- Verhindert, dass die SD-Karte mit der Zeit vollläuft
+- Verbessert die Systemperformance durch RAM-Freigabe
+- Entfernt automatisch alte, nicht mehr benötigte Pakete
+- Reduziert Log-Größe für schnellere Fehlersuche
+
+**Hinweis:**
+- Das Cleanup respektiert Benutzer-Daten und Konfigurationen
+- Nur Cache und temporäre Dateien werden gelöscht
+- Die Aktion ist sicher und kann nicht zu Datenverlust führen
 
 
 
@@ -450,10 +487,26 @@ Troubleshooting
   git log --oneline HEAD..origin/main  # zeigt verfügbare Updates
   ```
 
-**Module funktionieren nach Update nicht** 
-  - Das Skript versucht automatisch 3 Fallback-Strategien
+**npm install schlägt fehl wegen Netzwerkproblemen**
+- **Problem**: `npm error network read ECONNRESET` oder `ETIMEDOUT` während npm install
+- **Ursache**: Temporäre Netzwerkprobleme, Internet-Verbindung unterbrochen
+- **Lösung (automatisch seit 02/2026)**:
+  - Das Skript wiederholt npm install automatisch bis zu 3x mit 5 Sekunden Pause bei Netzwerkfehlern
+  - Bei kritischen Modulen (RTSPStream, etc.) wird eine E-Mail mit Reparatur-Anleitung versendet
+  - Im Status erscheint "⚠ Done with ERRORS" statt "✓ Done" bei Fehlschlag
+  - Fehlgeschlagene Module werden in der Update-Summary gezählt
+- **Manuelle Reparatur falls nötig**:
+  ```bash
+  cd /home/pi/MagicMirror/modules/MODULNAME
+  npm install
+  pm2 restart MagicMirror
+  ```
+
+**Module funktionieren nach Update nicht**
+  - Das Skript versucht automatisch 3 Fallback-Strategien (npm ci → install → install --omit=dev)
+  - Bei Netzwerkfehlern werden bis zu 3 Retry-Versuche mit 5 Sekunden Pause unternommen
   - Manuelle Reparatur: `rm -rf node_modules package-lock.json && npm install` im Modul-Ordner
-  - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde
+  - Log prüfen: `cat ~/update_modules.log` zeigt welche Strategie verwendet wurde und ob Retries stattfanden
 
 - **RTSPStream zeigt nur "loading" oder funktioniert nach Update nicht**:
   - **Automatische Fixes im Skript**:

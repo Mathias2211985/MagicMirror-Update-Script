@@ -1437,21 +1437,45 @@ for mod in "$MODULES_DIR"/*; do
         local modpath="$1"
         local cmd="$2"
         local rc=0
+        local max_retries=3
+        local retry_count=0
         log "Running: ${SUDO_CMD:+$SUDO_CMD }npm --prefix \"$modpath\" $cmd"
         tmpout=$(mktemp)
-        
-        # Try the requested command first
-        if npm_exec --prefix "$modpath" $cmd --no-audit --no-fund >"$tmpout" 2>&1; then
-          cat "$tmpout" | tee -a "$LOG_FILE"
-          rc=0
-          chown_module "$modpath"
-        else
-          cat "$tmpout" | tee -a "$LOG_FILE"
-          rc=1
-          
-          # Intelligent fallback: try different strategies based on error type
-          if grep -qi "Unknown command" "$tmpout" || grep -qi "unknown" "$tmpout"; then
-            log "npm reported unknown command for '$cmd' - trying fallback strategies"
+
+        # Try the requested command with retries for network errors
+        while [ $retry_count -lt $max_retries ]; do
+          if npm_exec --prefix "$modpath" $cmd --no-audit --no-fund >"$tmpout" 2>&1; then
+            cat "$tmpout" | tee -a "$LOG_FILE"
+            rc=0
+            chown_module "$modpath"
+            break
+          else
+            cat "$tmpout" | tee -a "$LOG_FILE"
+            rc=1
+
+            # Check if it's a network error that warrants a retry
+            if grep -qi "ECONNRESET\|ETIMEDOUT\|ENOTFOUND\|network" "$tmpout"; then
+              retry_count=$((retry_count + 1))
+              if [ $retry_count -lt $max_retries ]; then
+                log "Network error detected - retrying npm install (attempt $((retry_count + 1))/$max_retries)..."
+                sleep 5
+                continue
+              else
+                log "Network error persists after $max_retries attempts - giving up"
+              fi
+            fi
+            break
+          fi
+        done
+
+        if [ $rc -eq 0 ]; then
+          rm -f "$tmpout"
+          return 0
+        fi
+
+        # Intelligent fallback: try different strategies based on error type
+        if grep -qi "Unknown command" "$tmpout" || grep -qi "unknown" "$tmpout"; then
+          log "npm reported unknown command for '$cmd' - trying fallback strategies"
             
             # Strategy 1: Try npm ci if lockfile L
             if [ -f "$modpath/package-lock.json" ]; then
@@ -1495,6 +1519,9 @@ for mod in "$MODULES_DIR"/*; do
         return $rc
       }
 
+      # Track npm install failures for critical error handling
+      npm_install_failed=false
+
       # Execute npm with appropriate command and fallback
       if [ -n "$npm_special_cmd" ]; then
         # Use specified command with fallback support
@@ -1502,6 +1529,7 @@ for mod in "$MODULES_DIR"/*; do
           updated_any=true
         else
           log "npm ($npm_special_cmd) ultimately failed for $name"
+          npm_install_failed=true
         fi
       else
         # Universal strategy:
@@ -1514,6 +1542,7 @@ for mod in "$MODULES_DIR"/*; do
             updated_any=true
           else
             log "npm ci with fallbacks failed for $name"
+            npm_install_failed=true
           fi
         else
           log "Universal strategy: Using npm install (safe, preserves existing node_modules)"
@@ -1521,7 +1550,26 @@ for mod in "$MODULES_DIR"/*; do
             updated_any=true
           else
             log "npm install with fallbacks failed for $name"
+            npm_install_failed=true
           fi
+        fi
+      fi
+
+      # Check if npm install failed and handle accordingly
+      if [ "$npm_install_failed" = true ]; then
+        log_error "CRITICAL: npm install failed for $name - module may not work correctly!"
+
+        # Send email notification for critical modules
+        if [[ "$name" =~ RTSPStream|MMM-Remote-Control|MMM-Camera|calendar|weather ]]; then
+          send_email "CRITICAL: npm install failed for $name" \
+            "npm install failed for critical module $name after multiple retry attempts. The module may not function correctly. Please run 'cd $mod && npm install' manually." \
+            "error"
+        fi
+
+        # Verify node_modules directory exists
+        if [ ! -d "$mod/node_modules" ]; then
+          log "CRITICAL WARNING: node_modules directory is missing for $name!"
+          log "  Manual fix required: cd $mod && npm install"
         fi
       fi
     fi
@@ -1649,8 +1697,14 @@ for mod in "$MODULES_DIR"/*; do
     fi
   fi
 
-  log "✓ Done: $name"
-  exit 0  # Explicit success exit from subshell
+  # Final status check and report
+  if [ "${npm_install_failed:-false}" = true ]; then
+    log "⚠ Done with ERRORS: $name (npm install failed - module may not work!)"
+    exit 1  # Exit with error code to increment failed modules counter
+  else
+    log "✓ Done: $name"
+    exit 0  # Explicit success exit from subshell
+  fi
   ) 
   subshell_rc=$?
   if [ $subshell_rc -ne 0 ]; then
