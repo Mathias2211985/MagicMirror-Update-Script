@@ -1513,8 +1513,7 @@ for mod in "$MODULES_DIR"/*; do
             log "npm command failed for $modpath (non-unknown-command error)"
             rc=2
           fi
-        fi
-        
+
         rm -f "$tmpout"
         return $rc
       }

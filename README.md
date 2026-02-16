@@ -85,7 +85,29 @@ nano ~/.config/magicmirror-update/config.sh
 - `REBOOT_ONLY_ON_UPDATES` — `true` (Standard) rebootet **nur** wenn Updates installiert wurden.
 - `LOG_FILE` — Pfad zur Log-Datei (Standard: `$HOME/update_modules.log`).
 
-3) Dry-run testen:
+3) **Branch-Check für Module** (wichtig vor dem ersten Lauf):
+
+Viele MagicMirror-Module haben ihren Default-Branch von `master` auf `main` umgestellt (z.B. MMM-CalendarExt3). Wenn dein lokaler Clone noch auf `master` ist, kann das Script keine Updates finden. Prüfe und korrigiere das **einmalig** auf dem Pi:
+
+```bash
+cd /home/pi/MagicMirror/modules
+for mod in */; do
+  if [ -d "$mod/.git" ]; then
+    branch=$(git -C "$mod" rev-parse --abbrev-ref HEAD)
+    remote_main=$(git -C "$mod" remote show origin 2>/dev/null | grep "HEAD branch" | awk '{print $NF}')
+    if [ "$branch" != "$remote_main" ] && [ -n "$remote_main" ]; then
+      echo "⚠ $mod: lokal=$branch, remote=$remote_main — wechsle Branch..."
+      git -C "$mod" fetch origin
+      git -C "$mod" checkout "$remote_main"
+      git -C "$mod" branch -D "$branch" 2>/dev/null || true
+    fi
+  fi
+done
+```
+
+Dieses Kommando prüft alle Module und stellt sie automatisch auf den richtigen Remote-Branch um.
+
+4) Dry-run testen:
 
 ```bash
 # auf dem Pi
@@ -93,7 +115,7 @@ DRY_RUN=true ~/scripts/update_modules.sh
 # oder: export DRY_RUN=true; ~/scripts/update_modules.sh
 ```
 
-4) Wenn alles in Ordnung ist, echten Lauf starten:
+5) Wenn alles in Ordnung ist, echten Lauf starten:
 
 ```bash
 ~/scripts/update_modules.sh
@@ -475,8 +497,16 @@ Troubleshooting
 
 **Module Updates werden nicht erkannt (z.B. CalendarExt3)**
 - **Problem**: `git pull: already up-to-date` wird gemeldet, obwohl Updates verfügbar sind
-- **Ursache**: In seltenen Fällen kann `git pull --ff-only` keine Updates durchführen
-- **Lösung (automatisch seit 01/2026)**: 
+- **Häufigste Ursache**: Das Modul hat seinen Default-Branch umbenannt (z.B. `master` → `main`). Der lokale Clone ist noch auf dem alten Branch, der remote nicht mehr existiert. `git pull` findet dann keine Updates.
+- **Lösung**: Branch auf dem Pi umstellen (siehe Installation Schritt 3) oder manuell:
+  ```bash
+  cd /home/pi/MagicMirror/modules/MMM-CalendarExt3
+  git fetch origin
+  git checkout main
+  git branch -D master
+  ```
+- **Weitere Ursache**: In seltenen Fällen kann `git pull --ff-only` keine Updates durchführen
+- **Lösung (automatisch seit 01/2026)**:
   - Das Skript zählt verfügbare Commits nach `git fetch`
   - Wenn Commits verfügbar sind aber pull versagt, wird automatisch `git reset --hard origin/branch` verwendet
   - Im Log erscheint: "WARNING: git pull reported up-to-date but X commits are available on remote!"
@@ -484,6 +514,9 @@ Troubleshooting
   ```bash
   cd /home/pi/MagicMirror/modules/MMM-CalendarExt3
   git fetch origin
+  # Aktuellen Branch und Remote-Default prüfen:
+  git rev-parse --abbrev-ref HEAD
+  git remote show origin | grep "HEAD branch"
   git log --oneline HEAD..origin/main  # zeigt verfügbare Updates
   ```
 
