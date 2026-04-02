@@ -3,12 +3,128 @@
 # Durchsucht das modules-Verzeichnis und führt für jedes Modul:
 # - git pull (wenn .git vorhanden & keine lokalen Änderungen)
 # - npm install (wenn package.json vorhanden)
-# Optional: Neustart des pm2-Prozesses wenn Updates erfolgten
+# Optional: Neustart des Systems wenn Updates erfolgten
 
 # Only exit on undefined variables, but allow commands to fail
 # This makes the script robust for cron jobs - individual module failures won't stop the whole script
 set -u
 IFS=$'\n\t'
+
+# --- Self-Update Konfiguration ---
+SELF_UPDATE_ENABLED=true                     # true = Script prüft auf Updates vor dem Start
+SELF_UPDATE_REPO="https://github.com/Mathias2211985/MagicMirror-Update-Script.git"
+SELF_UPDATE_BRANCH="master"                  # Branch von dem Updates gezogen werden
+SELF_UPDATE_FILE="update_modules.sh"         # Dateiname des Scripts im Repo
+
+# --- CLI-Argumente ---
+SCRIPT_START_TIME=$(date +%s)
+CLI_CONFIG_FILE=""
+
+show_help() {
+  cat << 'HELPEOF'
+Usage: update_modules.sh [OPTIONS]
+
+Aktualisiert MagicMirror-Module, MagicMirror-Core und Raspberry Pi OS.
+
+Options:
+  -h, --help          Diese Hilfe anzeigen
+  -n, --dry-run       Trockenlauf - nichts verändern, nur berichten
+  -c, --config FILE   Konfigurationsdatei laden (statt Standard-Pfade)
+  -s, --status        Zeigt den aktuellen Status (Module, Versionen, etc.)
+  -v, --verbose       Ausführlichere Ausgabe
+  --no-self-update    Self-Update überspringen
+
+Konfiguration:
+  Standardmäßig werden alle Pfade und Einstellungen automatisch erkannt.
+  Überschreibe Werte in:  ~/.config/magicmirror-update/config.sh
+  Oder systemweit in:     /etc/magicmirror-update.conf
+
+Beispiele:
+  update_modules.sh                  # Normaler Lauf mit Auto-Detection
+  update_modules.sh --dry-run        # Nur prüfen, nichts ändern
+  update_modules.sh --config my.conf # Eigene Config verwenden
+HELPEOF
+  exit 0
+}
+
+show_status() {
+  echo "=== MagicMirror Status ==="
+  echo "User: $(whoami) (UID: $(id -u))"
+  if [ -d "$HOME/MagicMirror" ]; then
+    local mm_version
+    mm_version=$(node -p "require('$HOME/MagicMirror/package.json').version" 2>/dev/null || echo "unknown")
+    echo "MagicMirror: v$mm_version ($HOME/MagicMirror)"
+  else
+    echo "MagicMirror: not found in $HOME/MagicMirror"
+  fi
+  echo "Node: $(node --version 2>/dev/null || echo 'not found')"
+  echo "npm: $(npm --version 2>/dev/null || echo 'not found')"
+  if pgrep -x labwc >/dev/null 2>&1; then
+    echo "Display: Wayland (labwc)"
+  elif [ -n "${DISPLAY:-}" ]; then
+    echo "Display: X11 ($DISPLAY)"
+  else
+    echo "Display: none detected"
+  fi
+  if pgrep -f "electron.*js/electron.js" >/dev/null 2>&1; then
+    echo "MagicMirror: RUNNING"
+  else
+    echo "MagicMirror: NOT RUNNING"
+  fi
+  if command -v pm2 >/dev/null 2>&1; then
+    echo "PM2:"
+    pm2 list 2>/dev/null
+  fi
+  echo ""
+  echo "Module:"
+  if [ -d "$HOME/MagicMirror/modules" ]; then
+    for mod in "$HOME/MagicMirror/modules"/*/; do
+      [ -d "$mod" ] || continue
+      local name
+      name=$(basename "$mod")
+      [[ "$name" == default ]] && continue
+      echo "  - $name"
+    done
+  fi
+  exit 0
+}
+
+VERBOSE=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      show_help
+      ;;
+    -n|--dry-run)
+      DRY_RUN_CLI=true
+      shift
+      ;;
+    -c|--config)
+      if [ -z "${2:-}" ]; then
+        echo "ERROR: --config requires a file path"
+        exit 1
+      fi
+      CLI_CONFIG_FILE="$2"
+      shift 2
+      ;;
+    -s|--status)
+      show_status
+      ;;
+    -v|--verbose)
+      VERBOSE=true
+      shift
+      ;;
+    --no-self-update)
+      SELF_UPDATE_ENABLED=false
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1 (use --help for usage)"
+      exit 1
+      ;;
+  esac
+done
 
 # Set PATH for cron compatibility - ensures git, node, npm are found
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:$HOME/bin:$PATH"
@@ -16,19 +132,121 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/
 # Set TMPDIR if not set (required by nvm and some npm operations)
 export TMPDIR="${TMPDIR:-/tmp}"
 
-# Lockfile to prevent parallel execution
+# --- Self-Update: Script automatisch aktualisieren ---
+# Läuft VOR dem Lockfile, damit das neue Script den Lock holen kann
+self_update() {
+  if [ "$SELF_UPDATE_ENABLED" != true ]; then
+    return 0
+  fi
+
+  # Prevent infinite restart loops: if we already restarted once, skip
+  if [ "${_SELF_UPDATED:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local script_path
+  script_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  local script_dir
+  script_dir=$(dirname "$script_path")
+
+  # Method 1: If script lives in a git repo, use git pull
+  if [ -d "$script_dir/.git" ]; then
+    echo "[self-update] Checking for script updates via git..."
+    local old_hash new_hash
+    old_hash=$(git -C "$script_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+    if git -C "$script_dir" fetch origin "$SELF_UPDATE_BRANCH" --quiet 2>/dev/null; then
+      local behind
+      behind=$(git -C "$script_dir" rev-list HEAD..origin/"$SELF_UPDATE_BRANCH" --count 2>/dev/null || echo "0")
+
+      if [ "$behind" -gt 0 ]; then
+        echo "[self-update] $behind new commit(s) available - updating..."
+        if git -C "$script_dir" reset --hard origin/"$SELF_UPDATE_BRANCH" >/dev/null 2>&1; then
+          new_hash=$(git -C "$script_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+          echo "[self-update] Updated: ${old_hash:0:8} -> ${new_hash:0:8}"
+          echo "[self-update] Restarting with new version..."
+          export _SELF_UPDATED=1
+          exec "$script_path" "$@"
+          # exec replaces process - this line is never reached
+        else
+          echo "[self-update] WARNING: git reset failed - continuing with current version"
+        fi
+      else
+        echo "[self-update] Script is up to date (${old_hash:0:8})"
+      fi
+    else
+      echo "[self-update] WARNING: git fetch failed (no network?) - continuing with current version"
+    fi
+    return 0
+  fi
+
+  # Method 2: Download via curl/wget (if script is standalone, not in a git repo)
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    echo "[self-update] Checking for script updates via download..."
+    local raw_url="https://raw.githubusercontent.com/Mathias2211985/MagicMirror-Update-Script/${SELF_UPDATE_BRANCH}/${SELF_UPDATE_FILE}"
+    local tmp_script
+    tmp_script=$(mktemp)
+
+    local download_ok=false
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsSL --connect-timeout 10 "$raw_url" -o "$tmp_script" 2>/dev/null; then
+        download_ok=true
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -q --timeout=10 "$raw_url" -O "$tmp_script" 2>/dev/null; then
+        download_ok=true
+      fi
+    fi
+
+    if [ "$download_ok" = true ] && [ -s "$tmp_script" ]; then
+      # Verify it's actually a bash script (basic sanity check)
+      if head -1 "$tmp_script" | grep -q "^#!/"; then
+        # Compare with current script
+        local current_hash new_hash
+        current_hash=$(sha256sum "$script_path" 2>/dev/null | cut -d' ' -f1 || echo "")
+        new_hash=$(sha256sum "$tmp_script" 2>/dev/null | cut -d' ' -f1 || echo "")
+
+        if [ -n "$current_hash" ] && [ -n "$new_hash" ] && [ "$current_hash" != "$new_hash" ]; then
+          echo "[self-update] New version available - updating..."
+          # Preserve permissions
+          local perms
+          perms=$(stat -c '%a' "$script_path" 2>/dev/null || echo "755")
+          cp "$tmp_script" "$script_path"
+          chmod "$perms" "$script_path"
+          rm -f "$tmp_script"
+          echo "[self-update] Updated successfully - restarting..."
+          export _SELF_UPDATED=1
+          exec "$script_path" "$@"
+        else
+          echo "[self-update] Script is up to date"
+        fi
+      else
+        echo "[self-update] WARNING: Downloaded file doesn't look like a script - skipping update"
+      fi
+    else
+      echo "[self-update] WARNING: Download failed (no network?) - continuing with current version"
+    fi
+    rm -f "$tmp_script" 2>/dev/null
+  fi
+}
+
+# Self-Update ausführen (übergibt alle CLI-Argumente für den Neustart)
+self_update "$@"
+
+# Lockfile to prevent parallel execution (using mkdir for atomic creation)
 LOCKFILE="/tmp/update_modules.lock"
-if [ -f "$LOCKFILE" ]; then
-  lock_pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
-  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+if ! mkdir "$LOCKFILE" 2>/dev/null; then
+  lock_pid=$(cat "$LOCKFILE/pid" 2>/dev/null || echo "")
+  if [ -n "$lock_pid" ] && [ -d "/proc/$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
     echo "Another instance is already running (PID: $lock_pid). Exiting."
     exit 1
   else
-    echo "Removing stale lockfile"
-    rm -f "$LOCKFILE"
+    echo "Removing stale lockfile (old PID: $lock_pid)"
+    rm -rf "$LOCKFILE"
+    mkdir "$LOCKFILE" 2>/dev/null || { echo "Failed to create lockfile"; exit 1; }
   fi
 fi
-echo $$ > "$LOCKFILE"
+echo $$ > "$LOCKFILE/pid"
 
 # Temporary file to track updates from subshells (created early)
 MODULE_UPDATE_TRACKER=$(mktemp)
@@ -36,7 +254,8 @@ echo "0" > "$MODULE_UPDATE_TRACKER"
 
 # Cleanup function for lockfile and temp files
 cleanup_temp_files() {
-  rm -f "$LOCKFILE" "$MODULE_UPDATE_TRACKER" 2>/dev/null || true
+  rm -rf "$LOCKFILE" 2>/dev/null || true
+  rm -f "$MODULE_UPDATE_TRACKER" 2>/dev/null || true
 }
 
 # Load nvm if available (needed for cron jobs)
@@ -46,15 +265,104 @@ if [ -s "$HOME/.nvm/nvm.sh" ]; then
   source "$NVM_DIR/nvm.sh" || true
 fi
 
+# --- Auto-Detection Funktionen ---
+# Erkennt automatisch User, Pfade, Wayland-Socket und Start-Methode
+
+# Detect the user running MagicMirror (owner of the MagicMirror directory)
+detect_mm_user() {
+  local mm_dir="${1:-$HOME/MagicMirror}"
+  if [ -d "$mm_dir" ]; then
+    stat -c '%U' "$mm_dir" 2>/dev/null || echo "$USER"
+  else
+    echo "$USER"
+  fi
+}
+
+# Detect MagicMirror installation directory
+detect_mm_dir() {
+  # Check common locations
+  for dir in "$HOME/MagicMirror" "/opt/MagicMirror" "/home/$(whoami)/MagicMirror"; do
+    if [ -d "$dir" ] && [ -f "$dir/package.json" ]; then
+      echo "$dir"
+      return 0
+    fi
+  done
+  # Fallback: try to find it via running process
+  local proc_dir
+  proc_dir=$(ps aux 2>/dev/null | grep -oP '(?<=--cwd )\S*MagicMirror' | head -1 || echo "")
+  if [ -n "$proc_dir" ] && [ -d "$proc_dir" ]; then
+    echo "$proc_dir"
+    return 0
+  fi
+  echo "$HOME/MagicMirror"
+}
+
+# Detect available Wayland display socket
+detect_wayland_display() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  # Check for existing wayland sockets
+  for socket in "$runtime_dir"/wayland-*; do
+    [ -e "$socket" ] || continue
+    # Skip .lock files
+    case "$socket" in *.lock) continue ;; esac
+    echo "$(basename "$socket")"
+    return 0
+  done
+  # Fallback
+  echo "wayland-0"
+}
+
+# Detect the start method (labwc/wayland vs pm2/X11)
+detect_start_method() {
+  # Check if labwc compositor is running
+  if pgrep -x labwc >/dev/null 2>&1; then
+    echo "labwc"
+    return 0
+  fi
+  # Check if any wayland compositor is running
+  if pgrep -x "labwc\|wayfire\|sway\|weston" >/dev/null 2>&1; then
+    echo "labwc"
+    return 0
+  fi
+  # Check if X11 is running
+  if [ -n "${DISPLAY:-}" ] || pgrep -x Xorg >/dev/null 2>&1; then
+    echo "pm2"
+    return 0
+  fi
+  # Default to labwc for modern Raspberry Pi OS (Bookworm+)
+  if [ -f /etc/os-release ] && grep -q "bookworm\|trixie" /etc/os-release 2>/dev/null; then
+    echo "labwc"
+    return 0
+  fi
+  echo "pm2"
+}
+
+# Detect MagicMirror port from config.js
+detect_mm_port() {
+  local config_file="${1:-$HOME/MagicMirror/config/config.js}"
+  if [ -f "$config_file" ]; then
+    local port
+    port=$(grep -oP 'port\s*:\s*\K[0-9]+' "$config_file" 2>/dev/null | head -1)
+    if [ -n "$port" ]; then
+      echo "$port"
+      return 0
+    fi
+  fi
+  echo "8080"
+}
+
 # --- Konfiguration (anpassen) ---
 # Diese Werte können auch in einer externen Konfigurationsdatei überschrieben werden:
 # $HOME/.config/magicmirror-update/config.sh oder /etc/magicmirror-update.conf
+# Werte auf "auto" setzen für automatische Erkennung
 
-MODULES_DIR="/home/pi/MagicMirror/modules"   # Pfad zum modules-Ordner (z. B. /home/pi/MagicMirror/modules)
-MAGICMIRROR_DIR="/home/pi/MagicMirror"       # Pfad zum MagicMirror-Hauptverzeichnis
+MAGICMIRROR_DIR="auto"                       # "auto" = automatisch erkennen, oder Pfad angeben (z. B. /home/pi/MagicMirror)
+MODULES_DIR="auto"                           # "auto" = $MAGICMIRROR_DIR/modules, oder Pfad angeben
 PM2_PROCESS_NAME="MagicMirror"               # Name des pm2 Prozesses (z. B. 'MagicMirror')
+MM_START_SCRIPT="auto"                       # "auto" = $HOME/start-mm.sh, oder Pfad angeben
+MM_START_METHOD="auto"                       # "auto" = erkennen ob labwc/wayland oder pm2/X11, "labwc", "pm2"
 UPDATE_MAGICMIRROR_CORE=true                 # true = update MagicMirror core before updating modules
-RESTART_AFTER_UPDATES=true                   # true = restart pm2 process wenn Updates vorhanden
+RESTART_AFTER_UPDATES=true                   # true = restart/reboot wenn Updates vorhanden
 DRY_RUN=false                                # true = nur berichten, nichts verändern
 AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änderungen verwerfen (reset --hard + clean) - DESTRUKTIV
 LOG_FILE="$HOME/update_modules.log"
@@ -84,13 +392,23 @@ LOG_KEEP_COUNT=5                             # Anzahl der alten Logs die behalte
 # --- Healthcheck ---
 HEALTHCHECK_BEFORE_REBOOT=true              # true = MagicMirror testen bevor Reboot
 HEALTHCHECK_TIMEOUT=30                       # Sekunden warten auf MagicMirror-Start
-HEALTHCHECK_URL="http://localhost:8080"      # URL zum Testen ob MagicMirror läuft
+HEALTHCHECK_URL="auto"                       # "auto" = erkennt Port aus config.js, oder URL angeben (z. B. http://localhost:8080)
 
 # --- Externe Konfigurationsdatei laden (überschreibt obige Werte) ---
 CONFIG_FILE_USER="$HOME/.config/magicmirror-update/config.sh"
 CONFIG_FILE_SYSTEM="/etc/magicmirror-update.conf"
 
-if [ -f "$CONFIG_FILE_USER" ]; then
+# CLI --config hat Vorrang
+if [ -n "$CLI_CONFIG_FILE" ]; then
+  if [ -f "$CLI_CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$CLI_CONFIG_FILE"
+    echo "Loaded config from CLI argument: $CLI_CONFIG_FILE"
+  else
+    echo "ERROR: Config file not found: $CLI_CONFIG_FILE"
+    exit 1
+  fi
+elif [ -f "$CONFIG_FILE_USER" ]; then
   # shellcheck disable=SC1090
   source "$CONFIG_FILE_USER"
   echo "Loaded user config from $CONFIG_FILE_USER"
@@ -99,6 +417,40 @@ elif [ -f "$CONFIG_FILE_SYSTEM" ]; then
   source "$CONFIG_FILE_SYSTEM"
   echo "Loaded system config from $CONFIG_FILE_SYSTEM"
 fi
+
+# CLI --dry-run überschreibt Config-Wert
+if [ "${DRY_RUN_CLI:-false}" = true ]; then
+  DRY_RUN=true
+fi
+
+# --- Auto-Detection auflösen (nach externem Config-Laden) ---
+# Werte die auf "auto" stehen werden jetzt automatisch erkannt
+if [ "$MAGICMIRROR_DIR" = "auto" ]; then
+  MAGICMIRROR_DIR=$(detect_mm_dir)
+fi
+if [ "$MODULES_DIR" = "auto" ]; then
+  MODULES_DIR="$MAGICMIRROR_DIR/modules"
+fi
+if [ "$MM_START_METHOD" = "auto" ]; then
+  MM_START_METHOD=$(detect_start_method)
+fi
+if [ "$MM_START_SCRIPT" = "auto" ]; then
+  MM_START_SCRIPT="$HOME/start-mm.sh"
+fi
+if [ "$HEALTHCHECK_URL" = "auto" ]; then
+  HEALTHCHECK_URL="http://localhost:$(detect_mm_port "$MAGICMIRROR_DIR/config/config.js")"
+fi
+
+# Derive user that owns MagicMirror installation
+MM_USER=$(detect_mm_user "$MAGICMIRROR_DIR")
+
+echo "Auto-detected configuration:"
+echo "  MAGICMIRROR_DIR=$MAGICMIRROR_DIR"
+echo "  MODULES_DIR=$MODULES_DIR"
+echo "  MM_START_METHOD=$MM_START_METHOD"
+echo "  MM_START_SCRIPT=$MM_START_SCRIPT"
+echo "  HEALTHCHECK_URL=$HEALTHCHECK_URL"
+echo "  MM_USER=$MM_USER"
 
 # -- Spezialfälle: manche Module sollen mit anderem npm-Befehl aktualisiert werden.
 # Hier per Modulname anpassen. Beispiel: MMM-Webuntis braucht `npm ci --omit=dev`.
@@ -165,63 +517,24 @@ send_email() {
   fi
   
   if [ -z "$EMAIL_RECIPIENT" ]; then
-      if [ "$EMAIL_ATTACH_LOG" = true ] && [ -f "$LOG_FILE" ]; then
-        if command -v mail >/dev/null 2>&1; then
-          echo "$full_body" | mail -s "$full_subject" -a "$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
-          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via mail)"
-          return 0
-        elif command -v msmtp >/dev/null 2>&1; then
-          {
-            echo "To: $EMAIL_RECIPIENT"
-            echo "Subject: $full_subject"
-            echo "Content-Type: text/plain; charset=utf-8"
-            echo ""
-            echo "$full_body"
-          } | msmtp --attach="$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
-          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via msmtp)"
-          return 0
-        elif command -v sendmail >/dev/null 2>&1; then
-          {
-            echo "To: $EMAIL_RECIPIENT"
-            echo "Subject: $full_subject"
-            echo "MIME-Version: 1.0"
-            echo "Content-Type: multipart/mixed; boundary=\"LOGBOUNDARY\""
-            echo ""
-            echo "--LOGBOUNDARY"
-            echo "Content-Type: text/plain; charset=utf-8"
-            echo ""
-            echo "$full_body"
-            echo "--LOGBOUNDARY"
-            echo "Content-Type: text/plain; name=update_modules.log"
-            echo "Content-Disposition: attachment; filename=update_modules.log"
-            echo ""
-            cat "$LOG_FILE"
-            echo "--LOGBOUNDARY--"
-          } | sendmail -t 2>/dev/null
-          log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via sendmail)"
-          return 0
-        fi
-        # Fallback: Wenn kein Tool mit Anhang, sende wie bisher
-        log "WARNING: Kein Mail-Tool mit Anhang-Unterstützung gefunden, sende E-Mail ohne Anhang."
-      fi
     log "WARNING: EMAIL_ENABLED=true but EMAIL_RECIPIENT is empty"
     return 1
   fi
-  
+
   # Skip success emails if not enabled
   if [ "$priority" = "success" ] && [ "$EMAIL_ON_SUCCESS" != true ]; then
     return 0
   fi
-  
+
   # Skip error emails if not enabled
   if [ "$priority" = "error" ] && [ "$EMAIL_ON_ERROR" != true ]; then
     return 0
   fi
-  
+
   local full_subject="$EMAIL_SUBJECT_PREFIX $subject"
   local hostname
   hostname=$(hostname 2>/dev/null || echo "unknown")
-  
+
   # Zusätzliche Infos zum Body hinzufügen
   local full_body="$body
 
@@ -229,8 +542,49 @@ send_email() {
 Host: $hostname
 Zeit: $(timestamp)
 Log: $LOG_FILE"
-  
-  # Versuche verschiedene Mail-Tools
+
+  # Versuche E-Mail mit Log-Anhang zu senden (wenn aktiviert)
+  if [ "$EMAIL_ATTACH_LOG" = true ] && [ -f "$LOG_FILE" ]; then
+    if command -v mail >/dev/null 2>&1; then
+      echo "$full_body" | mail -s "$full_subject" -a "$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
+      log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via mail)"
+      return 0
+    elif command -v msmtp >/dev/null 2>&1; then
+      {
+        echo "To: $EMAIL_RECIPIENT"
+        echo "Subject: $full_subject"
+        echo "Content-Type: text/plain; charset=utf-8"
+        echo ""
+        echo "$full_body"
+      } | msmtp --attach="$LOG_FILE" "$EMAIL_RECIPIENT" 2>/dev/null
+      log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via msmtp)"
+      return 0
+    elif command -v sendmail >/dev/null 2>&1; then
+      {
+        echo "To: $EMAIL_RECIPIENT"
+        echo "Subject: $full_subject"
+        echo "MIME-Version: 1.0"
+        echo "Content-Type: multipart/mixed; boundary=\"LOGBOUNDARY\""
+        echo ""
+        echo "--LOGBOUNDARY"
+        echo "Content-Type: text/plain; charset=utf-8"
+        echo ""
+        echo "$full_body"
+        echo "--LOGBOUNDARY"
+        echo "Content-Type: text/plain; name=update_modules.log"
+        echo "Content-Disposition: attachment; filename=update_modules.log"
+        echo ""
+        cat "$LOG_FILE"
+        echo "--LOGBOUNDARY--"
+      } | sendmail -t 2>/dev/null
+      log "E-Mail mit Log-Anhang gesendet an $EMAIL_RECIPIENT (via sendmail)"
+      return 0
+    fi
+    # Fallback: Wenn kein Tool mit Anhang, sende ohne Anhang
+    log "WARNING: Kein Mail-Tool mit Anhang-Unterstützung gefunden, sende E-Mail ohne Anhang."
+  fi
+
+  # Versuche verschiedene Mail-Tools (ohne Anhang)
   if command -v mail >/dev/null 2>&1; then
     echo "$full_body" | mail -s "$full_subject" "$EMAIL_RECIPIENT" 2>/dev/null
     log "E-Mail gesendet an $EMAIL_RECIPIENT (via mail)"
@@ -284,8 +638,8 @@ SUDO_CMD=""
 if command -v sudo >/dev/null 2>&1; then
   SUDO_CMD="sudo"
 fi
-# user to own module files after npm (change if you use different user)
-CHOWN_USER="pi"
+# user to own module files after npm (auto-detected from MagicMirror directory)
+CHOWN_USER="$MM_USER"
 
 # Check and install/update Node.js version if needed for MagicMirror
 check_and_update_nodejs() {
@@ -517,53 +871,84 @@ apt_update_with_retry() {
 
 # --- Healthcheck Funktion ---
 # Prüft ob MagicMirror nach Updates korrekt startet
+# Unterstützt sowohl labwc (Prozess-Check + HTTP) als auch PM2 (legacy)
 perform_healthcheck() {
-  log "=== MagicMirror Healthcheck ==="
-  
-  # Starte/Restarte MagicMirror für Healthcheck
-  log "Restarting $PM2_PROCESS_NAME for healthcheck..."
-  if pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE"; then
-    log "pm2 restart command sent"
-  else
-    log "WARNING: pm2 restart failed"
-    return 1
-  fi
+  log "=== MagicMirror Healthcheck (method: $MM_START_METHOD) ==="
 
-  # Warte und prüfe Status
-  log "Waiting ${HEALTHCHECK_TIMEOUT}s for MagicMirror to start..."
-  local waited check_interval mm_running pm2_status http_success http_attempts http_max_attempts http_tool
+  local waited check_interval mm_running http_success http_attempts http_max_attempts http_tool
   http_tool=""
   waited=0
   check_interval=5
   mm_running=false
 
-  while [ $waited -lt "$HEALTHCHECK_TIMEOUT" ]; do
-    sleep $check_interval
-    waited=$((waited + check_interval))
-
-    pm2_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
-
-    if [ "$pm2_status" = "online" ]; then
-      log "✓ pm2 process is online (after ${waited}s)"
-      mm_running=true
-      break
-    elif [ "$pm2_status" = "errored" ] || [ "$pm2_status" = "stopped" ]; then
-      log "✗ pm2 process is $pm2_status after ${waited}s"
-      # Zeige Logs für Debugging
-      log "Last 20 lines of pm2 logs:"
-      pm2 logs "$PM2_PROCESS_NAME" --lines 20 --nostream 2>&1 | tee -a "$LOG_FILE" || true
-      return 1
-    fi
-    log "Waiting... ($waited/${HEALTHCHECK_TIMEOUT}s) - status: $pm2_status"
-  done
-
-  if [ "$mm_running" != true ]; then
-    log "✗ MagicMirror did not start within ${HEALTHCHECK_TIMEOUT}s"
-    log_error "MagicMirror Healthcheck fehlgeschlagen - Prozess startete nicht innerhalb von ${HEALTHCHECK_TIMEOUT}s"
-    return 1
+  # Detect available HTTP tool
+  if command -v curl >/dev/null 2>&1; then
+    http_tool="curl"
+  elif command -v wget >/dev/null 2>&1; then
+    http_tool="wget"
   fi
 
-  # HTTP Healthcheck wenn möglich
+  if [ "$MM_START_METHOD" = "labwc" ]; then
+    # labwc mode: check if electron process is running + HTTP check
+    log "Checking for running MagicMirror electron process..."
+
+    while [ $waited -lt "$HEALTHCHECK_TIMEOUT" ]; do
+      if pgrep -f "electron.*js/electron.js" >/dev/null 2>&1; then
+        log "✓ MagicMirror electron process is running (after ${waited}s)"
+        mm_running=true
+        break
+      fi
+      sleep $check_interval
+      waited=$((waited + check_interval))
+      log "Waiting... ($waited/${HEALTHCHECK_TIMEOUT}s) - electron process not found yet"
+    done
+
+    if [ "$mm_running" != true ]; then
+      log "✗ MagicMirror electron process not found within ${HEALTHCHECK_TIMEOUT}s"
+      log "  Active MagicMirror processes:"
+      ps aux | grep -E "[e]lectron|[n]ode.*MagicMirror|[s]tart-mm" 2>/dev/null | tee -a "$LOG_FILE" || true
+      log_error "MagicMirror Healthcheck fehlgeschlagen - Electron-Prozess nicht gefunden"
+      return 1
+    fi
+  else
+    # Legacy PM2 mode
+    log "Restarting $PM2_PROCESS_NAME for healthcheck..."
+    if pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE"; then
+      log "pm2 restart command sent"
+    else
+      log "WARNING: pm2 restart failed"
+      return 1
+    fi
+
+    log "Waiting ${HEALTHCHECK_TIMEOUT}s for MagicMirror to start..."
+    while [ $waited -lt "$HEALTHCHECK_TIMEOUT" ]; do
+      sleep $check_interval
+      waited=$((waited + check_interval))
+
+      local pm2_status
+      pm2_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "status" | awk '{print $4}' || echo "unknown")
+
+      if [ "$pm2_status" = "online" ]; then
+        log "✓ pm2 process is online (after ${waited}s)"
+        mm_running=true
+        break
+      elif [ "$pm2_status" = "errored" ] || [ "$pm2_status" = "stopped" ]; then
+        log "✗ pm2 process is $pm2_status after ${waited}s"
+        log "Last 20 lines of pm2 logs:"
+        pm2 logs "$PM2_PROCESS_NAME" --lines 20 --nostream 2>&1 | tee -a "$LOG_FILE" || true
+        return 1
+      fi
+      log "Waiting... ($waited/${HEALTHCHECK_TIMEOUT}s) - status: $pm2_status"
+    done
+
+    if [ "$mm_running" != true ]; then
+      log "✗ MagicMirror did not start within ${HEALTHCHECK_TIMEOUT}s"
+      log_error "MagicMirror Healthcheck fehlgeschlagen - Prozess startete nicht innerhalb von ${HEALTHCHECK_TIMEOUT}s"
+      return 1
+    fi
+  fi
+
+  # HTTP Healthcheck (both modes)
   if [ -n "$http_tool" ]; then
     log "Performing HTTP healthcheck on $HEALTHCHECK_URL..."
     sleep 5  # Kurz warten bis Server bereit
@@ -1037,46 +1422,46 @@ backup_modules() {
     log "(dry) would create backup: $archive from $MODULES_DIR"
     return 0
   fi
+  # Check disk space before backup (need at least 100MB free)
+  local free_kb
+  free_kb=$(df -k "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+  if [ "$free_kb" -lt 102400 ]; then
+    log "WARNING: Low disk space (${free_kb}KB free) - skipping backup to prevent full disk"
+    log_error "Backup übersprungen - weniger als 100MB freier Speicher"
+    return 2
+  fi
+
   log "Creating modules backup: $archive"
   if tar -czf "$archive" -C "$(dirname "$MODULES_DIR")" "$(basename "$MODULES_DIR")" 2>&1 | tee -a "$LOG_FILE"; then
-    log "Backup created: $archive"
-    
-    # Clean up old backups - keep only the last 4
-    log "Cleaning up old backups (keeping last 4)..."
-    backup_count=$(find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f 2>/dev/null | wc -l)
-    if [ "$backup_count" -gt 4 ]; then
-      find "$BACKUP_DIR" -name "magicmirror_modules_backup_*.tar.gz" -type f -printf '%T+ %p\n' 2>/dev/null | \
-        sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
-        log "Removing old backup: $old_backup"
-        rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
-      done
-      log "Old module backups cleaned up"
+    # Verify backup was actually created and is not empty
+    if [ ! -f "$archive" ] || [ ! -s "$archive" ]; then
+      log "ERROR: Backup file missing or empty after creation: $archive"
+      return 2
     fi
+    log "Backup created: $archive ($(du -h "$archive" 2>/dev/null | cut -f1))"
+
+    # Clean up old backups - keep only the last 4
+    # Uses ls -t for portability (works on non-GNU systems too)
+    log "Cleaning up old backups (keeping last 4)..."
+    ls -t "$BACKUP_DIR"/magicmirror_modules_backup_*.tar.gz 2>/dev/null | tail -n +5 | while read -r old_backup; do
+      log "Removing old backup: $old_backup"
+      rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+    done
 
     # Clean up old config backups - keep only the last 4
     if [ -d "$BACKUP_DIR/config_backups" ]; then
-      config_backup_count=$(find "$BACKUP_DIR/config_backups" -name "config_*.js" -type f 2>/dev/null | wc -l)
-      if [ "$config_backup_count" -gt 4 ]; then
-        find "$BACKUP_DIR/config_backups" -name "config_*.js" -type f -printf '%T+ %p\n' 2>/dev/null | \
-          sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
-          log "Removing old config backup: $old_backup"
-          rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
-        done
-        log "Old config backups cleaned up"
-      fi
+      ls -t "$BACKUP_DIR/config_backups"/config_*.js 2>/dev/null | tail -n +5 | while read -r old_backup; do
+        log "Removing old config backup: $old_backup"
+        rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+      done
     fi
 
     # Clean up old CSS backups - keep only the last 4
     if [ -d "$BACKUP_DIR/css_backups" ]; then
-      css_backup_count=$(find "$BACKUP_DIR/css_backups" -name "custom_*.css" -type f 2>/dev/null | wc -l)
-      if [ "$css_backup_count" -gt 4 ]; then
-        find "$BACKUP_DIR/css_backups" -name "custom_*.css" -type f -printf '%T+ %p\n' 2>/dev/null | \
-          sort | head -n -4 | cut -d' ' -f2- | while read -r old_backup; do
-          log "Removing old CSS backup: $old_backup"
-          rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
-        done
-        log "Old CSS backups cleaned up"
-      fi
+      ls -t "$BACKUP_DIR/css_backups"/custom_*.css 2>/dev/null | tail -n +5 | while read -r old_backup; do
+        log "Removing old CSS backup: $old_backup"
+        rm -f "$old_backup" 2>&1 | tee -a "$LOG_FILE" || true
+      done
     fi
 
     return 0
@@ -1928,12 +2313,14 @@ if [ "$updated_any" = true ]; then
     
     log "=== End RTSPStream Health Check ==="
     
-    # Save pm2 processes before reboot
-    if command -v pm2 >/dev/null 2>&1; then
+    # Save pm2 processes before reboot (only in pm2 mode)
+    if [ "$MM_START_METHOD" = "pm2" ] && command -v pm2 >/dev/null 2>&1; then
       log "Saving pm2 process list before reboot"
       pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
+    elif [ "$MM_START_METHOD" = "labwc" ]; then
+      log "labwc mode - MagicMirror will be started by labwc autostart after reboot"
     fi
-    
+
     # Reboot the system
     sudo_prefix=$(apt_get_prefix)
     log "Rebooting system now..."
@@ -1954,72 +2341,106 @@ else
   log "No updates were applied — no reboot necessary"
 fi
 
-# Ensure pm2 autostart is configured after any updates
-log "Checking pm2 autostart configuration"
-if command -v pm2 >/dev/null 2>&1; then
-  # Clean up any errored pm2 processes first
+# Ensure MagicMirror autostart is configured after any updates
+log "Checking MagicMirror autostart configuration (method: $MM_START_METHOD)"
+
+if [ "$MM_START_METHOD" = "labwc" ]; then
+  # labwc mode: verify start-mm.sh and labwc autostart are in place
   if [ "$DRY_RUN" = true ]; then
-    log "(dry) would clean up errored pm2 processes"
+    log "(dry) would verify labwc autostart configuration"
   else
-    errored_procs=$(pm2 jlist 2>/dev/null | jq -r '.[] | select(.pm2_env.status == "errored") | .name' 2>/dev/null || echo "")
-    if [ -n "$errored_procs" ]; then
-      log "Found errored pm2 processes, cleaning up: $errored_procs"
-      echo "$errored_procs" | while read -r proc; do
-        [ -n "$proc" ] && pm2 delete "$proc" 2>&1 | tee -a "$LOG_FILE" || true
-      done
-    fi
-  fi
-  
-  # Save current pm2 processes
-  if [ "$DRY_RUN" = true ]; then
-    log "(dry) would run: pm2 save"
-  else
-    pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
-  fi
-  
-  # Check if startup script is installed
-  startup_check=$(pm2 startup 2>&1 | grep -c "sudo env" || echo "0")
-  if [ "$startup_check" -gt 0 ]; then
-    log "pm2 startup not configured - showing startup command"
-    pm2 startup 2>&1 | tee -a "$LOG_FILE"
-    log "IMPORTANT: Run the sudo command shown above to enable pm2 autostart"
-  else
-    log "pm2 startup appears to be configured"
-    # Verify the startup script L
-    if [ -f /etc/systemd/system/pm2-pi.service ] || [ -f /etc/systemd/system/pm2-$USER.service ]; then
-      log "pm2 systemd service found"
-      # Ensure service is enabled and running
-      if [ "$DRY_RUN" = true ]; then
-        log "(dry) would check and enable pm2 systemd service"
-      else
-        sudo_prefix=$(apt_get_prefix)
-        if [ -n "$sudo_prefix" ]; then
-          log "Checking pm2-$USER service status:"
-          $sudo_prefix systemctl is-enabled pm2-$USER 2>&1 | tee -a "$LOG_FILE" || true
-          $sudo_prefix systemctl is-active pm2-$USER 2>&1 | tee -a "$LOG_FILE" || true
-          $sudo_prefix systemctl enable pm2-$USER 2>&1 | tee -a "$LOG_FILE" || log "Failed to enable pm2-$USER service"
-          
-          # Check if pm2 process is actually starting the right app
-          log "Current pm2 processes after startup check:"
-          pm2 list 2>&1 | tee -a "$LOG_FILE" || true
-          
-          # Check if MagicMirror process L and is healthy
-          mm_status=$(pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -E "(status|pid|uptime)" || echo "Process not found")
-          log "MagicMirror process status: $mm_status"
-          
-          # If process is errored or not found, try to restart
-          if pm2 show "$PM2_PROCESS_NAME" 2>/dev/null | grep -q "errored\|stopped"; then
-            log "MagicMirror process is errored/stopped, attempting restart"
-            pm2 restart "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE" || log "pm2 restart failed"
-          fi
-        fi
-      fi
+    # Check start-mm.sh exists and is executable
+    if [ -x "$MM_START_SCRIPT" ]; then
+      log "✓ Start script found: $MM_START_SCRIPT"
     else
-      log "pm2 systemd service not found - run 'pm2 startup' manually"
+      log "WARNING: Start script missing or not executable: $MM_START_SCRIPT"
+      log "Creating start script with auto-detected values..."
+      local wayland_socket
+      wayland_socket=$(detect_wayland_display)
+      local user_uid
+      user_uid=$(id -u "$MM_USER" 2>/dev/null || id -u)
+      cat > "$MM_START_SCRIPT" << STARTEOF
+#!/bin/bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
+export WAYLAND_DISPLAY=$wayland_socket
+export XDG_RUNTIME_DIR=/run/user/$user_uid
+export XDG_SESSION_TYPE=wayland
+cd $MAGICMIRROR_DIR
+npm start
+STARTEOF
+      chmod +x "$MM_START_SCRIPT"
+      log "Start script created: $MM_START_SCRIPT"
+    fi
+
+    # Check labwc autostart includes start-mm.sh
+    local labwc_autostart="$HOME/.config/labwc/autostart"
+    if [ -f "$labwc_autostart" ] && grep -q "start-mm.sh" "$labwc_autostart"; then
+      log "✓ labwc autostart is configured"
+    else
+      log "WARNING: labwc autostart not configured - adding start-mm.sh"
+      mkdir -p "$HOME/.config/labwc"
+      echo "# MagicMirror via start-mm.sh" >> "$labwc_autostart"
+      echo "$MM_START_SCRIPT &" >> "$labwc_autostart"
+      log "labwc autostart updated: $labwc_autostart"
+    fi
+
+    # Verify MagicMirror electron process is running
+    if pgrep -f "electron.*js/electron.js" >/dev/null 2>&1; then
+      log "✓ MagicMirror electron process is running"
+    else
+      log "WARNING: MagicMirror electron process not found"
+      log "  This is expected if the system has not rebooted yet after updates"
+    fi
+
+    # Ensure pm2 dump does NOT contain MagicMirror (prevent double-start on reboot)
+    if command -v pm2 >/dev/null 2>&1; then
+      local mm_in_pm2
+      mm_in_pm2=$(pm2 jlist 2>/dev/null | jq -r ".[] | select(.name == \"$PM2_PROCESS_NAME\") | .name" 2>/dev/null || echo "")
+      if [ -n "$mm_in_pm2" ]; then
+        log "WARNING: MagicMirror found in pm2 process list - removing to prevent double-start"
+        pm2 delete "$PM2_PROCESS_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+        pm2 save --force 2>&1 | tee -a "$LOG_FILE" || true
+        log "MagicMirror removed from pm2 (labwc handles autostart)"
+      fi
     fi
   fi
 else
-  log "pm2 not found - cannot configure autostart"
+  # Legacy PM2 mode
+  log "Using legacy PM2 autostart"
+  if command -v pm2 >/dev/null 2>&1; then
+    # Clean up any errored pm2 processes first
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would clean up errored pm2 processes"
+    else
+      errored_procs=$(pm2 jlist 2>/dev/null | jq -r '.[] | select(.pm2_env.status == "errored") | .name' 2>/dev/null || echo "")
+      if [ -n "$errored_procs" ]; then
+        log "Found errored pm2 processes, cleaning up: $errored_procs"
+        echo "$errored_procs" | while read -r proc; do
+          [ -n "$proc" ] && pm2 delete "$proc" 2>&1 | tee -a "$LOG_FILE" || true
+        done
+      fi
+    fi
+
+    # Save current pm2 processes
+    if [ "$DRY_RUN" = true ]; then
+      log "(dry) would run: pm2 save"
+    else
+      pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
+    fi
+
+    # Check if startup script is installed
+    startup_check=$(pm2 startup 2>&1 | grep -c "sudo env" || echo "0")
+    if [ "$startup_check" -gt 0 ]; then
+      log "pm2 startup not configured - showing startup command"
+      pm2 startup 2>&1 | tee -a "$LOG_FILE"
+      log "IMPORTANT: Run the sudo command shown above to enable pm2 autostart"
+    else
+      log "pm2 startup appears to be configured"
+    fi
+  else
+    log "pm2 not found - cannot configure autostart"
+  fi
 fi
 
 # --- Automatische Log-Fehlerprüfung & Korrektur (ab Feb 2026) ---
@@ -2084,15 +2505,35 @@ scan_and_fix_log_errors() {
     log "Automatische Korrektur: npm install für fehlende package-lock.json durchgeführt."
     fix_attempted=true
   fi
-  # npm audit fix bei bekannten Schwachstellen
+  # Wayland-Verbindungsfehler erkennen (nach MagicMirror v2.35+ Update)
+  if grep -qiE "Failed to connect to Wayland display|Failed to initialize Wayland platform|platform failed to initialize" "$logfile"; then
+    error_found=true
+    log "Automatische Korrektur: Wayland-Fehler erkannt - MagicMirror kann sich nicht mit dem Wayland-Display verbinden"
+    log "  Dies passiert typischerweise wenn MagicMirror aus einer TTY/SSH-Session gestartet wird"
+    log "  statt aus der grafischen labwc-Session."
+    if [ "$MM_START_METHOD" != "labwc" ]; then
+      log "  EMPFEHLUNG: Setze MM_START_METHOD=\"labwc\" in der Konfiguration"
+      log "  und stelle sicher dass $MM_START_SCRIPT existiert und ausführbar ist"
+    fi
+    # Prüfe ob start-mm.sh die richtigen Wayland-Variablen hat
+    if [ -f "$MM_START_SCRIPT" ]; then
+      if ! grep -q "WAYLAND_DISPLAY" "$MM_START_SCRIPT"; then
+        log "  WARNING: $MM_START_SCRIPT fehlt WAYLAND_DISPLAY Variable"
+      fi
+      if ! grep -q "XDG_SESSION_TYPE" "$MM_START_SCRIPT"; then
+        log "  WARNING: $MM_START_SCRIPT fehlt XDG_SESSION_TYPE Variable"
+      fi
+    fi
+    send_email "Wayland-Fehler erkannt" "MagicMirror kann sich nicht mit dem Wayland-Display verbinden. Prüfe start-mm.sh und labwc-Konfiguration." "error"
+  fi
+  # npm audit: Schwachstellen nur melden, NICHT automatisch fixen
+  # npm audit fix --force kann Major-Version-Upgrades erzwingen und Module zerstören
   if grep -qiE "npm audit report|found [0-9]+ vulnerabilities" "$logfile"; then
     error_found=true
-    log "Automatische Korrektur: npm audit Schwachstellen erkannt. Versuche npm audit fix in MagicMirror..."
-    pushd "$MAGICMIRROR_DIR" >/dev/null
-    npm audit fix --force 2>&1 | tee -a "$LOG_FILE"
-    popd >/dev/null
-    log "Automatische Korrektur: npm audit fix durchgeführt."
-    fix_attempted=true
+    log "WARNING: npm audit Schwachstellen erkannt im Log"
+    log "  Automatisches 'npm audit fix --force' ist deaktiviert (kann Module zerstören)"
+    log "  Bitte manuell prüfen: cd $MAGICMIRROR_DIR && npm audit"
+    send_email "npm Schwachstellen erkannt" "npm audit hat Schwachstellen gefunden. Bitte manuell prüfen: cd $MAGICMIRROR_DIR && npm audit" "error"
   fi
   # Weitere typische Fehler prüfen und ggf. korrigieren
   if grep -qiE "Cannot find module 'datauri'|datauri FAIL" "$logfile"; then
@@ -2116,6 +2557,67 @@ scan_and_fix_log_errors() {
 
 # Am Ende des Skripts ausführen
 scan_and_fix_log_errors
+
+# --- Zusammenfassung ---
+print_summary() {
+  local end_time
+  end_time=$(date +%s)
+  local duration=$(( end_time - SCRIPT_START_TIME ))
+  local minutes=$(( duration / 60 ))
+  local seconds=$(( duration % 60 ))
+
+  log "============================================"
+  log "=== Update-Zusammenfassung ==="
+  log "============================================"
+  log "Dauer:            ${minutes}m ${seconds}s"
+  log "Start-Methode:    $MM_START_METHOD"
+  log "MagicMirror-Dir:  $MAGICMIRROR_DIR"
+  log "DRY_RUN:          $DRY_RUN"
+
+  # MagicMirror Version
+  if [ -f "$MAGICMIRROR_DIR/package.json" ]; then
+    local mm_ver
+    mm_ver=$(node -p "require('$MAGICMIRROR_DIR/package.json').version" 2>/dev/null || echo "unknown")
+    log "MagicMirror:      v$mm_ver"
+  fi
+
+  # Module-Updates
+  local update_count
+  update_count=$(cat "$MODULE_UPDATE_TRACKER" 2>/dev/null || echo "0")
+  log "Module aktualisiert: $update_count"
+
+  # Updates angewendet?
+  if [ "${updated_any:-false}" = true ]; then
+    log "Updates:          JA - Änderungen wurden angewendet"
+  else
+    log "Updates:          NEIN - alles war aktuell"
+  fi
+
+  # MagicMirror Status
+  if pgrep -f "electron.*js/electron.js" >/dev/null 2>&1; then
+    log "MagicMirror:      LÄUFT ✓"
+  else
+    log "MagicMirror:      NICHT GESTARTET (wird nach Reboot starten)"
+  fi
+
+  # Reboot anstehend?
+  if [ -f /var/run/reboot-required ]; then
+    log "Reboot:           ERFORDERLICH"
+  else
+    log "Reboot:           nicht erforderlich"
+  fi
+
+  # Speicherplatz
+  local disk_free
+  disk_free=$(df -h / 2>/dev/null | awk 'NR==2 {print $4}' || echo "unknown")
+  log "Freier Speicher:  $disk_free"
+
+  log "============================================"
+  log "Log-Datei: $LOG_FILE"
+  log "============================================"
+}
+
+print_summary
 
 log "Update run finished"
 exit 0

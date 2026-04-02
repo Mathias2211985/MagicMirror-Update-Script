@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash -n \"c:/Users/mathi/OneDrive/Dokumente/GitHub/MagicMirror-Update-Script/update_modules.sh\")",
+      "Bash(bash -n \"c:\\\\Users\\\\mathi\\\\OneDrive\\\\Dokumente\\\\GitHub\\\\MagicMirror-Update-Script\\\\update_modules.sh\")"
+    ]
+  }
+}
