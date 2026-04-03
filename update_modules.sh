@@ -1073,12 +1073,28 @@ on_exit_handler() {
   fi
   
   if [ "$should_reboot" = true ]; then
+    # Final Electron check: ensure MagicMirror can start after reboot
+    if [ ! -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
+      log "CRITICAL: Electron missing before reboot! Running npm install to fix..."
+      pushd "$MAGICMIRROR_DIR" >/dev/null 2>&1 || true
+      npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || log "ERROR: npm install failed - MagicMirror may not start after reboot!"
+      popd >/dev/null 2>&1 || true
+      if [ -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
+        log "✓ Electron restored successfully before reboot"
+      else
+        log "ERROR: Electron still missing after npm install! MagicMirror will NOT start after reboot."
+        log_error "Electron fehlt nach npm install - MagicMirror wird nach dem Reboot nicht starten!"
+      fi
+    else
+      log "✓ Electron verified present before reboot"
+    fi
+
     # Healthcheck vor dem Reboot durchführen
     if ! perform_healthcheck; then
       log "WARNING: Healthcheck failed - reboot will still proceed"
       log_error "Healthcheck vor Reboot fehlgeschlagen! System wird trotzdem neu gestartet."
     fi
-    
+
     log "Performing reboot now (script exit code $rc)"
     sudo_prefix=$(apt_get_prefix)
     # call reboot via sudo if necessary; ignore any failure to avoid masking original exit status
@@ -1182,7 +1198,13 @@ update_magicmirror_core() {
   local config_backup="/tmp/magicmirror_config_backup_$(date +%Y%m%d_%H%M%S).js"
   local config_restored=false
   
-  local css_file="$MAGICMIRROR_DIR/css/custom.css"
+  # custom.css can be in css/ or config/ depending on user setup — check both
+  local css_file=""
+  if [ -f "$MAGICMIRROR_DIR/css/custom.css" ]; then
+    css_file="$MAGICMIRROR_DIR/css/custom.css"
+  elif [ -f "$MAGICMIRROR_DIR/config/custom.css" ]; then
+    css_file="$MAGICMIRROR_DIR/config/custom.css"
+  fi
   local css_backup="/tmp/magicmirror_custom_css_backup_$(date +%Y%m%d_%H%M%S).css"
   local css_restored=false
   
@@ -1206,8 +1228,8 @@ update_magicmirror_core() {
   fi
   
   # Backup custom.css before update
-  if [ -f "$css_file" ]; then
-    log "Backing up custom.css to $css_backup"
+  if [ -n "$css_file" ] && [ -f "$css_file" ]; then
+    log "Backing up custom.css ($css_file) to $css_backup"
     if [ "$DRY_RUN" = true ]; then
       log "(dry) would backup $css_file to $css_backup"
     else
@@ -1222,7 +1244,7 @@ update_magicmirror_core() {
       fi
     fi
   else
-    log "Warning: custom.css not found at $css_file - skipping backup"
+    log "Warning: custom.css not found in css/ or config/ - skipping backup"
   fi
   
   pushd "$MAGICMIRROR_DIR" >/dev/null
@@ -1237,7 +1259,8 @@ update_magicmirror_core() {
       else
         git fetch origin --prune 2>&1 | tee -a "$LOG_FILE" || log "git fetch failed for MagicMirror core"
         git reset --hard origin/master 2>&1 | tee -a "$LOG_FILE" || log "git reset failed for MagicMirror core"
-        git clean -fdx 2>&1 | tee -a "$LOG_FILE" || true
+        # Exclude config/ and node_modules/ from clean — config has user settings, node_modules will be handled by npm install
+        git clean -fdx -e "config/" -e "node_modules/" -e "css/" 2>&1 | tee -a "$LOG_FILE" || true
       fi
     else
       log "Skipping MagicMirror core update due to local changes (set AUTO_DISCARD_LOCAL=true to overwrite)"
@@ -1355,8 +1378,8 @@ update_magicmirror_core() {
   fi
   
   # Restore custom.css after update if it was backed up
-  if [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
-    log "Restoring custom.css from backup"
+  if [ -n "$css_file" ] && [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
+    log "Restoring custom.css to $css_file from backup"
     if [ -f "$css_file" ]; then
       # custom.css exists after update - check if it's different from backup
       if ! diff -q "$css_file" "$css_backup" >/dev/null 2>&1; then
@@ -1364,20 +1387,21 @@ update_magicmirror_core() {
         cp -p "$css_file" "${css_file}.updated_$(date +%Y%m%d_%H%M%S)" 2>&1 | tee -a "$LOG_FILE" || true
       fi
     fi
-    
-    # Restore original custom.css
+
+    # Restore original custom.css (create parent dir if needed)
+    mkdir -p "$(dirname "$css_file")" || true
     cp -p "$css_backup" "$css_file" 2>&1 | tee -a "$LOG_FILE"
     if [ $? -eq 0 ]; then
-      log "✓ custom.css restored successfully"
+      log "✓ custom.css restored successfully to $css_file"
       css_restored=true
       # Clean up temp backup after successful restore
       rm -f "$css_backup" 2>&1 | tee -a "$LOG_FILE" || true
     else
       log "ERROR: Could not restore custom.css from $css_backup - please restore manually!"
     fi
-  elif [ ! -f "$css_file" ] && [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
+  elif [ -n "$css_file" ] && [ ! -f "$css_file" ] && [ -f "$css_backup" ] && [ "$DRY_RUN" = false ]; then
     # custom.css missing after update but we have backup
-    log "Warning: custom.css missing after update - restoring from backup"
+    log "Warning: custom.css missing after update - restoring from backup to $css_file"
     mkdir -p "$(dirname "$css_file")" || true
     cp -p "$css_backup" "$css_file" 2>&1 | tee -a "$LOG_FILE"
     if [ $? -eq 0 ]; then
@@ -2319,6 +2343,22 @@ if [ "$updated_any" = true ]; then
       pm2 save 2>&1 | tee -a "$LOG_FILE" || log "pm2 save failed"
     elif [ "$MM_START_METHOD" = "labwc" ]; then
       log "labwc mode - MagicMirror will be started by labwc autostart after reboot"
+    fi
+
+    # Final Electron check before reboot
+    if [ ! -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
+      log "CRITICAL: Electron missing before reboot! Running npm install to fix..."
+      pushd "$MAGICMIRROR_DIR" >/dev/null 2>&1 || true
+      npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || log "ERROR: npm install failed"
+      popd >/dev/null 2>&1 || true
+      if [ -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
+        log "✓ Electron restored successfully before reboot"
+      else
+        log "ERROR: Electron still missing! MagicMirror will NOT start after reboot."
+        log_error "Electron fehlt - MagicMirror wird nach dem Reboot nicht starten!"
+      fi
+    else
+      log "✓ Electron verified present before reboot"
     fi
 
     # Reboot the system

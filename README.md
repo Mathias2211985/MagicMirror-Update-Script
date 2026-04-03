@@ -4,13 +4,15 @@ This folder contains a script to automatically update MagicMirror modules (git +
 
 **🆕 Self-Update, Wayland/labwc-Support & Auto-Detection (April 2026)**
 - ✓ **Self-Update**: Script aktualisiert sich automatisch von GitHub bevor es startet — neue Features und Bugfixes werden automatisch eingespielt
-
 - ✓ **Wayland/labwc-Support**: MagicMirror v2.35+ nutzt Wayland statt X11 — Script erkennt und konfiguriert das automatisch
 - ✓ **Auto-Detection**: Alle Pfade, User, Wayland-Socket, Display-Server und Port werden automatisch erkannt (`"auto"` als Default)
 - ✓ **Flexibles start-mm.sh**: Wird automatisch erstellt mit korrekten Wayland-Variablen, NVM-Pfad und MagicMirror-Verzeichnis
 - ✓ **Doppelstart-Schutz**: Verhindert dass MagicMirror sowohl über PM2-resurrect als auch labwc-autostart gestartet wird
-- ✓ **CLI-Argumente**: `--help`, `--dry-run`, `--config FILE`, `--status`, `--verbose`
+- ✓ **CLI-Argumente**: `--help`, `--dry-run`, `--config FILE`, `--status`, `--verbose`, `--no-self-update`
 - ✓ **Zusammenfassungs-Report**: Am Ende jedes Laufs: Dauer, Anzahl Updates, MM-Status, Speicherplatz
+- ✓ **Electron-Schutz vor Reboot**: Prüft ob Electron installiert ist bevor ein Reboot durchgeführt wird — installiert es automatisch nach falls fehlend
+- ✓ **custom.css Backup-Fix**: custom.css wird jetzt in `config/` UND `css/` gesucht (vorher nur `css/` — falsch bei vielen Setups)
+- ✓ **git clean schützt User-Dateien**: `git clean -fdx` im Core-Update schließt jetzt `config/`, `css/` und `node_modules/` aus — verhindert Datenverlust
 - ✓ **Atomares Lockfile**: Race Condition behoben — nutzt jetzt `mkdir` statt File-Check
 - ✓ **npm audit fix --force entfernt**: Konnte Module durch Major-Version-Upgrades zerstören — jetzt nur Warnung + E-Mail
 - ✓ **Backup-Sicherheit**: Speicherplatz-Check (min. 100MB) vor Backup, Validierung nach Erstellung
@@ -356,7 +358,9 @@ MAGICMIRROR_DIR="auto"          # "auto" = automatisch erkennen (Standard)
 - Falls der Core nicht aktualisiert werden soll, setze `UPDATE_MAGICMIRROR_CORE=false`
 
 **config.js & custom.css Schutz:**
-Das Skript sichert automatisch deine `config/config.js` und `css/custom.css` vor dem Update:
+Das Skript sichert automatisch deine `config/config.js` und `custom.css` vor dem Update:
+- **custom.css Auto-Detection**: Wird automatisch in `config/custom.css` und `css/custom.css` gesucht — funktioniert mit beiden Pfaden
+- **git clean Schutz (Neu 04/2026)**: `git clean -fdx` im Core-Update schließt `config/`, `css/` und `node_modules/` aus — User-Dateien werden nicht mehr gelöscht
 - **Temporäres Backup:** `/tmp/magicmirror_config_backup_TIMESTAMP.js` und `/tmp/magicmirror_custom_css_backup_TIMESTAMP.css` (werden nach Wiederherstellung gelöscht)
 - **Permanentes Backup:** 
   - `~/module_backups/config_backups/config_TIMESTAMP.js` (bleibt erhalten)
@@ -366,11 +370,12 @@ Das Skript sichert automatisch deine `config/config.js` und `css/custom.css` vor
 - **Fehlerfall:** Bei fehlenden Dateien nach Update erfolgt automatische Wiederherstellung aus Backup
 - **Hinweis:** custom.css ist optional - fehlende Datei wird nur als Warnung geloggt
 
-**Fehlerbehebung bei "electron: not found":**
-Das Skript behebt diesen Fehler automatisch durch:
-- Entfernen alter `node_modules` vor Installation
-- Mehrfache Fallback-Strategien bei Installationsfehlern
-- Verifikation der Electron-Installation nach dem Update
+**Electron-Schutz (Neu 04/2026):**
+Das Skript stellt sicher, dass Electron nach Updates vorhanden ist:
+- **Vor jedem Reboot**: Prüft ob `node_modules/.bin/electron` existiert — installiert es automatisch nach falls fehlend
+- **git clean schützt node_modules**: `git clean -fdx -e "node_modules/"` verhindert versehentliches Löschen
+- **Fallback-Strategien**: `npm install --engine-strict=false` mit mehreren Versuchen
+- **Fehlermeldung**: CRITICAL-Warnung + E-Mail falls Electron nach npm install immer noch fehlt
 
 Universelle Modul-Update-Strategie
 Das Skript funktioniert **automatisch mit allen MagicMirror-Modulen** ohne manuelle Konfiguration:
