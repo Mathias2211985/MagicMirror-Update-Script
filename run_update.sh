@@ -34,9 +34,19 @@ for rel_path in "${PROTECTED_FILES[@]}"; do
 done
 
 # 2) Update-Script ausführen
+# Temporäre Config: internen Neustart deaktivieren, damit nur WIR neu starten
+# (nach dem Restore der custom Dateien – sonst läuft MM kurz mit falschen Modulen)
+TEMP_CONF=$(mktemp /tmp/mm_update_XXXX.conf)
+cat > "$TEMP_CONF" <<'EOF'
+RESTART_AFTER_UPDATES=false
+AUTO_REBOOT_AFTER_SCRIPT=false
+AUTO_REBOOT_AFTER_UPGRADE=false
+EOF
+
 echo ""
-echo "[2/4] Starte update_modules.sh ..."
-bash "$SCRIPT_DIR/update_modules.sh" || true
+echo "[2/4] Starte update_modules.sh (interner Neustart deaktiviert) ..."
+bash "$SCRIPT_DIR/update_modules.sh" --config "$TEMP_CONF" || true
+rm -f "$TEMP_CONF"
 
 # 3) Custom-Dateien zurückkopieren
 echo ""
