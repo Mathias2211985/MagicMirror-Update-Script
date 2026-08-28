@@ -107,6 +107,7 @@ nano ~/.config/magicmirror-update/config.sh
 - `RESTART_AFTER_UPDATES` — `true` oder `false` (ob der Pi nach Updates neu gestartet werden soll).
 - `DRY_RUN` — `true` um eine Simulation zu fahren (keine Änderungen, kein Reboot). Auch per CLI: `--dry-run`.
 - `AUTO_DISCARD_LOCAL` — `true` (Standard) verwirft automatisch lokale Änderungen in Git-Repos.
+- `POST_UPDATE_CMD` — leer (Standard). Befehl der nach allen Modul-Updates läuft, aber vor apt-Upgrade und Neustart. Gedacht um eigene Patches wiederherzustellen, die `AUTO_DISCARD_LOCAL` verwirft (siehe Abschnitt *Eigene Patches an Modulen erhalten*).
 - `RUN_RASPBIAN_UPDATE` — `true` (Standard) führt `apt-get update` und `apt-get full-upgrade` nach Modul-Updates aus.
 - `AUTO_REBOOT_AFTER_SCRIPT` — `false` (Standard) rebootet **nicht** nach jedem Lauf (nur bei Updates).
 - `REBOOT_ONLY_ON_UPDATES` — `true` (Standard) rebootet **nur** wenn Updates installiert wurden.
@@ -517,8 +518,25 @@ Automatisches System-Cleanup (ab Februar 2026)
 
 
 
+**Eigene Patches an Modulen erhalten**
+
+`AUTO_DISCARD_LOCAL=true` (Standard) macht bei **jedem** Lauf ein `git reset --hard` auf jedes Modul mit lokalen Änderungen — auch wenn es upstream gar kein Update gibt. Eigene Korrekturen an Modul-Dateien sind damit spätestens nach dem nächsten Cron-Lauf weg. Lokale Commits helfen nicht, `git reset --hard origin/<branch>` löscht sie mit.
+
+Statt `AUTO_DISCARD_LOCAL=false` zu setzen (dann bekommt das Modul nie wieder Updates), lässt sich der Patch nach dem Update automatisch neu anlegen:
+
+```bash
+# in ~/.config/magicmirror-update/config.sh
+POST_UPDATE_CMD="$HOME/scripts/patch_meine_module.sh"
+```
+
+Das Skript sollte **idempotent** sein — also per `grep` prüfen, ob der Patch schon vorhanden ist, und nur dann eingreifen. So schadet ein mehrfacher Aufruf nicht.
+
+Zusätzlich empfiehlt sich der gleiche Aufruf in `start-mm.sh` vor `npm start`: Wenn das Skript nach dem Update rebootet, greift der Hook zwar noch vor dem Neustart, aber der Aufruf beim Start ist die verlässlichere Absicherung. Ein `@reboot`-Cron-Eintrag ist dafür ungeeignet — der läuft gegen den labwc-Autostart um die Wette.
+
+Nicht betroffen vom Reset sind `config/` und `css/` im MagicMirror-Kern, die schließt das `git clean` ausdrücklich aus.
+
 Hinweise und Edge-Cases
-- **Lokale Änderungen**: Bei `AUTO_DISCARD_LOCAL=true` (Standard) werden lokale Änderungen automatisch verworfen (`git reset --hard` + `git clean -fdx`). Sonst werden Repositories mit lokalen Änderungen übersprungen.
+- **Lokale Änderungen**: Bei `AUTO_DISCARD_LOCAL=true` (Standard) werden lokale Änderungen automatisch verworfen (`git reset --hard` + `git clean -fdx`). Sonst werden Repositories mit lokalen Änderungen übersprungen. Um eigene Patches trotzdem zu behalten, siehe *Eigene Patches an Modulen erhalten*.
 - **Git Pull**: Das Skript verwendet `git pull --ff-only` mit automatischem Fallback zu `git reset --hard origin/branch` falls Updates verfügbar sind aber pull versagt.
 - **Update-Erkennung**: Nach `git fetch` wird die Anzahl verfügbarer Commits geprüft - funktioniert zuverlässig mit allen Branches (main/master/etc.).
 - **npm**: Universelle Strategie für alle Module - automatische Wahl zwischen `npm ci` und `npm install` basierend auf Git-Update-Status und Lockfile-Vorhandensein.

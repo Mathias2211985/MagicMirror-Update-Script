@@ -365,6 +365,7 @@ UPDATE_MAGICMIRROR_CORE=true                 # true = update MagicMirror core be
 RESTART_AFTER_UPDATES=true                   # true = restart/reboot wenn Updates vorhanden
 DRY_RUN=false                                # true = nur berichten, nichts verändern
 AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änderungen verwerfen (reset --hard + clean) - DESTRUKTIV
+POST_UPDATE_CMD=""                           # Befehl der nach allen Modul-Updates läuft, z. B. um lokale Patches neu anzulegen die AUTO_DISCARD_LOCAL verwirft
 LOG_FILE="$HOME/update_modules.log"
 RUN_RASPBIAN_UPDATE=true                      # true = run apt-get full-upgrade on the Raspberry Pi after module updates (requires sudo or root)
 MAKE_MODULE_BACKUP=true                       # true = create a tar.gz backup of the modules directory before apt upgrade
@@ -2206,6 +2207,27 @@ apply_rtsp_stop_guard() {
 #     apply_rtsp_stop_guard "$mod"
 #   fi
 # done
+
+# --- Post-Update-Hook -------------------------------------------------------
+# Läuft nach allen Modul-Updates, aber vor apt-Upgrade und Neustart.
+# Gedacht für lokale Patches an Modul-Dateien: die verwirft AUTO_DISCARD_LOCAL=true
+# bei jedem Lauf per "git reset --hard", weshalb sie danach neu angelegt werden müssen.
+# Beispiel in der Konfigurationsdatei:  POST_UPDATE_CMD="$HOME/scripts/patch_dwd.sh"
+if [ -n "${POST_UPDATE_CMD:-}" ]; then
+  if [ "$DRY_RUN" = true ]; then
+    log "(dry) would run POST_UPDATE_CMD: $POST_UPDATE_CMD"
+  else
+    log "=== POST_UPDATE_CMD wird ausgeführt ==="
+    log "  $POST_UPDATE_CMD"
+    if bash -c "$POST_UPDATE_CMD" >> "$LOG_FILE" 2>&1; then
+      log "✓ POST_UPDATE_CMD erfolgreich"
+    else
+      rc=$?
+      log "✗ POST_UPDATE_CMD fehlgeschlagen (Exit-Code $rc)"
+      log_error "POST_UPDATE_CMD fehlgeschlagen (Exit-Code $rc): $POST_UPDATE_CMD"
+    fi
+  fi
+fi
 
 if [ "$DRY_RUN" = true ]; then
   log "DRY RUN finished — no restarts performed"

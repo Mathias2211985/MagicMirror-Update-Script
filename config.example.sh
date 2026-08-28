@@ -24,6 +24,13 @@
 # DRY_RUN=false                         # Trockenlauf ohne Änderungen
 # AUTO_DISCARD_LOCAL=true               # Lokale Änderungen verwerfen (DESTRUKTIV!)
 
+# === Post-Update-Hook ===
+# Befehl der nach allen Modul-Updates läuft, aber vor apt-Upgrade und Neustart.
+# Nützlich für eigene Patches an Modul-Dateien: die verwirft AUTO_DISCARD_LOCAL=true
+# bei jedem Lauf, deshalb müssen sie danach neu angelegt werden.
+# Das Skript sollte idempotent sein (mehrfacher Aufruf darf nichts kaputt machen).
+# POST_UPDATE_CMD="$HOME/scripts/patch_dwd.sh"
+
 # === Raspbian/Debian Updates ===
 # RUN_RASPBIAN_UPDATE=true              # apt full-upgrade ausführen
 # APT_UPDATE_MAX_ATTEMPTS=4             # Wiederholungsversuche bei Lock
