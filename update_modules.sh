@@ -91,6 +91,12 @@ show_status() {
 
 VERBOSE=false
 
+# Original-Argumente sichern, BEVOR die Schleife sie per shift verbraucht.
+# self_update() startet das Skript nach einem Update neu und braucht sie dafür.
+# Ohne diese Kopie wäre "$@" dort leer, und ein "--dry-run" würde nach einem
+# Self-Update zu einem echten Lauf samt Reboot.
+_ORIG_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
@@ -230,8 +236,15 @@ self_update() {
   fi
 }
 
-# Self-Update ausführen (übergibt alle CLI-Argumente für den Neustart)
-self_update "$@"
+# Self-Update ausführen. Die gesicherten Original-Argumente übergeben, nicht "$@" —
+# das ist hier durch die Parse-Schleife oben bereits leer.
+# Zusätzlich die Dry-Run-Absicht in die Umgebung legen: selbst wenn die Argumente
+# beim Neustart einmal verloren gingen, darf aus einem Trockenlauf niemals ein
+# echter Lauf mit Reboot werden.
+if [ "${DRY_RUN_CLI:-false}" = true ]; then
+  export DRY_RUN_CLI=true
+fi
+self_update ${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}
 
 # Lockfile to prevent parallel execution (using mkdir for atomic creation)
 LOCKFILE="/tmp/update_modules.lock"
