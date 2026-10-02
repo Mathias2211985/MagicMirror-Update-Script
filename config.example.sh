@@ -31,6 +31,14 @@
 # Das Skript sollte idempotent sein (mehrfacher Aufruf darf nichts kaputt machen).
 # POST_UPDATE_CMD="$HOME/scripts/patch_dwd.sh"
 
+# === Electron-Version festnageln ===
+# Leer = die Version aus MagicMirrors package.json wird installiert.
+# Auf 32-Bit-ARM (armv7l, z. B. Raspberry Pi mit 32-Bit-OS) nötig: ab Electron 44
+# werden für diese Architektur keine Builds mehr veröffentlicht. Die letzte Reihe
+# mit 32-Bit-Unterstützung ist 43 (gepflegt bis Januar 2027).
+# Architektur prüfen mit:  uname -m
+# ELECTRON_PIN="43.7.7"
+
 # === Raspbian/Debian Updates ===
 # RUN_RASPBIAN_UPDATE=true              # apt full-upgrade ausführen
 # APT_UPDATE_MAX_ATTEMPTS=4             # Wiederholungsversuche bei Lock

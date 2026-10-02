@@ -108,6 +108,7 @@ nano ~/.config/magicmirror-update/config.sh
 - `DRY_RUN` — `true` um eine Simulation zu fahren (keine Änderungen, kein Reboot). Auch per CLI: `--dry-run`.
 - `AUTO_DISCARD_LOCAL` — `true` (Standard) verwirft automatisch lokale Änderungen in Git-Repos.
 - `POST_UPDATE_CMD` — leer (Standard). Befehl der nach allen Modul-Updates läuft, aber vor apt-Upgrade und Neustart. Gedacht um eigene Patches wiederherzustellen, die `AUTO_DISCARD_LOCAL` verwirft (siehe Abschnitt *Eigene Patches an Modulen erhalten*).
+- `ELECTRON_PIN` — leer (Standard). Erzwingt eine bestimmte Electron-Version, z. B. `"43.7.7"`. Auf 32-Bit-ARM nötig (siehe Abschnitt *Electron auf 32-Bit-ARM*).
 - `RUN_RASPBIAN_UPDATE` — `true` (Standard) führt `apt-get update` und `apt-get full-upgrade` nach Modul-Updates aus.
 - `AUTO_REBOOT_AFTER_SCRIPT` — `false` (Standard) rebootet **nicht** nach jedem Lauf (nur bei Updates).
 - `REBOOT_ONLY_ON_UPDATES` — `true` (Standard) rebootet **nur** wenn Updates installiert wurden.
@@ -517,6 +518,25 @@ Automatisches System-Cleanup (ab Februar 2026)
 - Die Aktion ist sicher und kann nicht zu Datenverlust führen
 
 
+
+**Electron auf 32-Bit-ARM**
+
+Ab **Electron 44** werden keine `linux/armv7l`-Builds mehr veröffentlicht. Läuft dein Pi mit einem 32-Bit-System (`uname -m` sagt `armv7l`), schlägt jedes MagicMirror-Update fehl, das eine neuere Electron-Version mitbringt — MagicMirror 2.38 fordert `^44`. Der Mirror startet danach gar nicht mehr:
+
+```
+Error: Electron v44.5.1 does not have a published linux/armv7l artifact.
+```
+
+Abhilfe: die letzte Reihe mit 32-Bit-Unterstützung festnageln (gepflegt bis Januar 2027):
+
+```bash
+# in ~/.config/magicmirror-update/config.sh
+ELECTRON_PIN="43.7.7"
+```
+
+Das Skript prüft vor jedem Neustart, ob Electron **wirklich startet** — es ruft die Binary mit `--version` auf, statt nur zu schauen ob `node_modules/.bin/electron` existiert. Dieser Pfad ist nur ein von npm angelegter Wrapper und liegt auch dann da, wenn der Download der Binary fehlgeschlagen ist. Schlägt die Prüfung fehl, versucht das Skript eine Reparatur; gelingt die nicht, **wird der Neustart übersprungen**, damit der laufende Mirror mit dem alten Stand weiterläuft statt in einen schwarzen Bildschirm zu rebooten.
+
+Langfristig ist der Umstieg auf ein **64-Bit-System** die eigentliche Lösung (jeder Pi ab Modell 3 kann das).
 
 **Eigene Patches an Modulen erhalten**
 

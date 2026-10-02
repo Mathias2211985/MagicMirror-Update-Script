@@ -366,6 +366,7 @@ RESTART_AFTER_UPDATES=true                   # true = restart/reboot wenn Update
 DRY_RUN=false                                # true = nur berichten, nichts verändern
 AUTO_DISCARD_LOCAL=true                       # true = automatisch lokale Änderungen verwerfen (reset --hard + clean) - DESTRUKTIV
 POST_UPDATE_CMD=""                           # Befehl der nach allen Modul-Updates läuft, z. B. um lokale Patches neu anzulegen die AUTO_DISCARD_LOCAL verwirft
+ELECTRON_PIN=""                              # leer = Version aus MagicMirrors package.json. Sonst exakte Version erzwingen, z. B. "43.7.7" — nötig auf 32-Bit-ARM (armv7l), dort gibt es ab Electron 44 keine Builds mehr
 LOG_FILE="$HOME/update_modules.log"
 RUN_RASPBIAN_UPDATE=true                      # true = run apt-get full-upgrade on the Raspberry Pi after module updates (requires sudo or root)
 MAKE_MODULE_BACKUP=true                       # true = create a tar.gz backup of the modules directory before apt upgrade
@@ -870,6 +871,82 @@ apt_update_with_retry() {
   return 2
 }
 
+# --- Electron: die echte Binary prüfen, nicht den npm-Shim -------------------
+#
+# node_modules/.bin/electron ist nur ein von npm angelegter Wrapper. Der liegt
+# auch dann da, wenn der Download der eigentlichen Binary fehlgeschlagen ist.
+# Genau das passierte am 02.10.2026: MagicMirror 2.38 fordert Electron ^44,
+# und für linux/armv7l gibt es ab Electron 44 keine Builds mehr. Alle Prüfungen
+# meldeten "Electron verified present", das Skript rebootete — und der Mirror
+# startete nicht mehr. Deshalb wird hier die Binary gesucht und ausgeführt.
+
+# Pfad zur echten Electron-Binary ausgeben (0 = gefunden)
+electron_binary_path() {
+  local mm_dir="${1:-$MAGICMIRROR_DIR}"
+  local base="$mm_dir/node_modules/electron"
+  [ -d "$base" ] || return 1
+  local rel="electron"
+  if [ -f "$base/path.txt" ]; then
+    rel=$(tr -d '\r\n' < "$base/path.txt" 2>/dev/null)
+    [ -n "$rel" ] || rel="electron"
+  fi
+  echo "$base/dist/$rel"
+}
+
+# Prüft, ob Electron tatsächlich startfähig ist (0 = ja)
+electron_is_working() {
+  local mm_dir="${1:-$MAGICMIRROR_DIR}"
+  local bin out
+  bin=$(electron_binary_path "$mm_dir") || return 1
+  [ -x "$bin" ] || return 1
+  # "--version" beendet sich vor dem Fenster-Aufbau und braucht keinen Compositor
+  out=$(timeout 30 "$bin" --version 2>/dev/null) || return 1
+  case "$out" in
+    v[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Gibt die laufende Electron-Version aus, oder "unbekannt"
+electron_version_string() {
+  local mm_dir="${1:-$MAGICMIRROR_DIR}"
+  local bin out
+  bin=$(electron_binary_path "$mm_dir") 2>/dev/null || { echo "unbekannt"; return; }
+  out=$(timeout 30 "$bin" --version 2>/dev/null) || out=""
+  [ -n "$out" ] && echo "$out" || echo "unbekannt"
+}
+
+# Versucht, Electron wieder lauffähig zu machen (0 = erfolgreich)
+repair_electron() {
+  local mm_dir="${1:-$MAGICMIRROR_DIR}"
+
+  if [ "${DRY_RUN:-false}" = true ]; then
+    log "(dry) würde Electron in $mm_dir reparieren"
+    return 0
+  fi
+
+  pushd "$mm_dir" >/dev/null 2>&1 || return 1
+
+  if [ -n "${ELECTRON_PIN:-}" ]; then
+    log "Electron: installiere fixierte Version $ELECTRON_PIN"
+    rm -rf node_modules/electron
+    npm install --no-save --no-audit --no-fund --engine-strict=false "electron@$ELECTRON_PIN" >>"$LOG_FILE" 2>&1 || true
+  else
+    log "Electron: npm install zur Reparatur"
+    npm install --engine-strict=false >>"$LOG_FILE" 2>&1 || true
+  fi
+
+  # Bei --no-save läuft der postinstall-Download nicht zuverlässig mit
+  if ! electron_is_working "$mm_dir" && [ -f node_modules/electron/install.js ]; then
+    log "Electron: hole Binary per install.js nach"
+    node node_modules/electron/install.js >>"$LOG_FILE" 2>&1 || true
+  fi
+
+  popd >/dev/null 2>&1 || true
+
+  electron_is_working "$mm_dir"
+}
+
 # --- Healthcheck Funktion ---
 # Prüft ob MagicMirror nach Updates korrekt startet
 # Unterstützt sowohl labwc (Prozess-Check + HTTP) als auch PM2 (legacy)
@@ -890,6 +967,16 @@ perform_healthcheck() {
   fi
 
   if [ "$MM_START_METHOD" = "labwc" ]; then
+    # Ein laufender Prozess beweist nichts über den AKTUALISIERTEN Stand: er
+    # stammt noch von vor dem Update und läuft mit den alten Dateien weiter.
+    # Deshalb zuerst prüfen, ob die Electron-Binary überhaupt startfähig ist.
+    if ! electron_is_working "$MAGICMIRROR_DIR"; then
+      log "✗ Electron-Binary ist nicht lauffähig — ein noch laufender Prozess stammt von vor dem Update"
+      log_error "Healthcheck: Electron-Binary nicht lauffähig, MagicMirror würde nach einem Neustart nicht hochkommen"
+      return 1
+    fi
+    log "✓ Electron-Binary lauffähig ($(electron_version_string "$MAGICMIRROR_DIR"))"
+
     # labwc mode: check if electron process is running + HTTP check
     log "Checking for running MagicMirror electron process..."
 
@@ -1074,22 +1161,28 @@ on_exit_handler() {
   fi
   
   if [ "$should_reboot" = true ]; then
-    # Final Electron check: ensure MagicMirror can start after reboot
-    if [ ! -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
-      log "CRITICAL: Electron missing before reboot! Running npm install to fix..."
-      pushd "$MAGICMIRROR_DIR" >/dev/null 2>&1 || true
-      npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || log "ERROR: npm install failed - MagicMirror may not start after reboot!"
-      popd >/dev/null 2>&1 || true
-      if [ -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
-        log "✓ Electron restored successfully before reboot"
-      else
-        log "ERROR: Electron still missing after npm install! MagicMirror will NOT start after reboot."
-        log_error "Electron fehlt nach npm install - MagicMirror wird nach dem Reboot nicht starten!"
-      fi
-    else
-      log "✓ Electron verified present before reboot"
+    # Vor dem Reboot prüfen, ob Electron wirklich startet — nicht nur, ob der
+    # npm-Shim existiert. Schlägt das fehl, wird NICHT neu gestartet: ein
+    # laufender Mirror mit altem Stand ist besser als ein schwarzer Bildschirm,
+    # und der Fehler bleibt sichtbar, statt im nächsten Boot zu verschwinden.
+    if ! electron_is_working "$MAGICMIRROR_DIR"; then
+      log "CRITICAL: Electron ist nicht lauffähig! Versuche Reparatur vor dem Reboot..."
+      repair_electron "$MAGICMIRROR_DIR" || true
     fi
 
+    if electron_is_working "$MAGICMIRROR_DIR"; then
+      log "✓ Electron vor dem Reboot geprüft und lauffähig ($(electron_version_string "$MAGICMIRROR_DIR"))"
+    else
+      log "✗ Electron ist nicht lauffähig — REBOOT WIRD ÜBERSPRUNGEN."
+      log "  Der laufende Mirror bleibt mit dem alten Stand aktiv."
+      log "  Auf 32-Bit-ARM (armv7l): ELECTRON_PIN=\"43.7.7\" in der Konfiguration setzen —"
+      log "  ab Electron 44 gibt es für diese Architektur keine Builds mehr."
+      log_error "Electron nicht lauffähig — Reboot übersprungen, damit der Mirror weiterläuft. Auf 32-Bit-ARM ELECTRON_PIN setzen."
+      should_reboot=false
+    fi
+  fi
+
+  if [ "$should_reboot" = true ]; then
     # Healthcheck vor dem Reboot durchführen
     if ! perform_healthcheck; then
       log "WARNING: Healthcheck failed - reboot will still proceed"
@@ -1152,21 +1245,17 @@ check_and_update_nodejs
 # Prüft, ob electron im MagicMirror-Ordner installiert ist, und führt ggf. npm install aus
 ensure_electron_installed() {
   local mm_dir="$MAGICMIRROR_DIR"
-  if [ ! -d "$mm_dir/node_modules/.bin" ] || [ ! -f "$mm_dir/node_modules/.bin/electron" ]; then
-    log "Electron nicht gefunden – führe npm install im MagicMirror-Ordner aus..."
-    if [ "$DRY_RUN" = true ]; then
-      log "(dry) würde im $mm_dir: npm install ausführen"
-    else
-      pushd "$mm_dir" >/dev/null
-      if npm install 2>&1 | tee -a "$LOG_FILE"; then
-        log "✓ npm install im MagicMirror-Ordner erfolgreich (electron installiert)"
-      else
-        log "✗ npm install im MagicMirror-Ordner fehlgeschlagen – electron fehlt weiterhin!"
-      fi
-      popd >/dev/null
-    fi
+  if electron_is_working "$mm_dir"; then
+    log "✓ Electron ist lauffähig ($(electron_version_string "$mm_dir"))"
+    return 0
+  fi
+
+  log "Electron fehlt oder ist nicht lauffähig – versuche Reparatur..."
+  if repair_electron "$mm_dir"; then
+    log "✓ Electron repariert ($(electron_version_string "$mm_dir"))"
   else
-    log "✓ Electron ist im MagicMirror-Ordner installiert"
+    log "✗ Electron weiterhin nicht lauffähig – MagicMirror wird nicht starten!"
+    log_error "Electron nicht lauffähig. Auf 32-Bit-ARM (armv7l) ELECTRON_PIN=\"43.7.7\" setzen — ab Electron 44 gibt es dort keine Builds mehr."
   fi
 }
 
@@ -1299,20 +1388,18 @@ update_magicmirror_core() {
           if npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || node --run install-mm 2>&1 | tee -a "$LOG_FILE"; then
             log "✓ MagicMirror dependencies installed successfully"
             
-            # Verify that electron was installed correctly
-            if [ -f "./node_modules/.bin/electron" ]; then
-              log "✓ Electron binary verified at ./node_modules/.bin/electron"
+            # Prüfen, ob Electron wirklich startfähig ist. Ein Core-Update kann
+            # eine Electron-Version fordern, die es für diese Architektur nicht
+            # gibt — dann liegt zwar das Paket da, aber keine Binary.
+            if electron_is_working "$MAGICMIRROR_DIR"; then
+              log "✓ Electron lauffähig ($(electron_version_string "$MAGICMIRROR_DIR"))"
             else
-              log "WARNING: Electron binary not found, attempting fallback installation"
-              if npm install 2>&1 | tee -a "$LOG_FILE"; then
-                log "✓ Fallback npm install completed"
-                if [ -f "./node_modules/.bin/electron" ]; then
-                  log "✓ Electron now available after fallback"
-                else
-                  log "ERROR: Electron still missing after fallback - manual fix may be required"
-                fi
+              log "WARNING: Electron nicht lauffähig, versuche Reparatur"
+              if repair_electron "$MAGICMIRROR_DIR"; then
+                log "✓ Electron nach Reparatur lauffähig ($(electron_version_string "$MAGICMIRROR_DIR"))"
               else
-                log "ERROR: Fallback npm install failed"
+                log "ERROR: Electron weiterhin nicht lauffähig — MagicMirror wird nicht starten"
+                log_error "Electron nach Core-Update nicht lauffähig. Auf 32-Bit-ARM ELECTRON_PIN setzen (ab Electron 44 keine armv7l-Builds)."
               fi
             fi
             
@@ -2367,33 +2454,38 @@ if [ "$updated_any" = true ]; then
       log "labwc mode - MagicMirror will be started by labwc autostart after reboot"
     fi
 
-    # Final Electron check before reboot
-    if [ ! -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
-      log "CRITICAL: Electron missing before reboot! Running npm install to fix..."
-      pushd "$MAGICMIRROR_DIR" >/dev/null 2>&1 || true
-      npm install --engine-strict=false 2>&1 | tee -a "$LOG_FILE" || log "ERROR: npm install failed"
-      popd >/dev/null 2>&1 || true
-      if [ -f "$MAGICMIRROR_DIR/node_modules/.bin/electron" ]; then
-        log "✓ Electron restored successfully before reboot"
-      else
-        log "ERROR: Electron still missing! MagicMirror will NOT start after reboot."
-        log_error "Electron fehlt - MagicMirror wird nach dem Reboot nicht starten!"
-      fi
+    # Vor dem Reboot prüfen, ob Electron wirklich startet (nicht nur der npm-Shim)
+    electron_ok=true
+    if ! electron_is_working "$MAGICMIRROR_DIR"; then
+      log "CRITICAL: Electron ist nicht lauffähig! Versuche Reparatur vor dem Reboot..."
+      repair_electron "$MAGICMIRROR_DIR" || true
+    fi
+    if electron_is_working "$MAGICMIRROR_DIR"; then
+      log "✓ Electron vor dem Reboot geprüft und lauffähig ($(electron_version_string "$MAGICMIRROR_DIR"))"
     else
-      log "✓ Electron verified present before reboot"
+      electron_ok=false
+      log "✗ Electron ist nicht lauffähig — REBOOT WIRD ÜBERSPRUNGEN."
+      log "  Der laufende Mirror bleibt mit dem alten Stand aktiv."
+      log "  Auf 32-Bit-ARM (armv7l): ELECTRON_PIN=\"43.7.7\" in der Konfiguration setzen —"
+      log "  ab Electron 44 gibt es für diese Architektur keine Builds mehr."
+      log_error "Electron nicht lauffähig — Reboot übersprungen, damit der Mirror weiterläuft. Auf 32-Bit-ARM ELECTRON_PIN setzen."
     fi
 
     # Reboot the system
-    sudo_prefix=$(apt_get_prefix)
-    log "Rebooting system now..."
-    if [ "$DRY_RUN" = true ]; then
-      log "(dry) would reboot system now"
+    if [ "$electron_ok" != true ]; then
+      log "Reboot übersprungen (siehe oben)"
     else
-      sync  # Ensure all file system writes are completed
-      if [ -n "$sudo_prefix" ]; then
-        $sudo_prefix reboot || log "Reboot command failed"
+      sudo_prefix=$(apt_get_prefix)
+      log "Rebooting system now..."
+      if [ "$DRY_RUN" = true ]; then
+        log "(dry) would reboot system now"
       else
-        reboot || log "Reboot command failed (no sudo available)"
+        sync  # Ensure all file system writes are completed
+        if [ -n "$sudo_prefix" ]; then
+          $sudo_prefix reboot || log "Reboot command failed"
+        else
+          reboot || log "Reboot command failed (no sudo available)"
+        fi
       fi
     fi
   else
