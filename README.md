@@ -147,6 +147,8 @@ Dieses Kommando prüft alle Module und stellt sie automatisch auf den richtigen 
 DRY_RUN=true ~/scripts/update_modules.sh
 ```
 
+Hinweis: Das Skript aktualisiert **sich selbst**, bevor es loslegt — auch im Trockenlauf. Findet es eine neue Fassung, startet es sich damit neu und übernimmt dabei die Argumente. Soll das Skript unverändert bleiben, zusätzlich `--no-self-update` angeben.
+
 5) Status prüfen (ohne Änderungen):
 
 ```bash
